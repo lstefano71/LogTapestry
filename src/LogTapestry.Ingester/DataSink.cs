@@ -76,8 +76,6 @@ namespace LogTapestry.Ingester
       // 3. Iterate and build all lists according to the 3-LEVEL LIST specification
       foreach (var list in fieldsList) {
         if (list.Count == 0) {
-          // This record has an empty list. DL=1 signifies the list exists but is empty.
-          // RL=0 because this is the first (and only) entry for this record's list.
           repLevels.Add(0);
           keyDefLevels.Add(1);
           stringDefLevels.Add(1);
@@ -87,16 +85,14 @@ namespace LogTapestry.Ingester
         } else {
           for (int j = 0; j < list.Count; j++) {
             var element = list[j];
-            // RL=0 for the first element in a record's list, 1 for subsequent elements.
             repLevels.Add(j == 0 ? 0 : 1);
 
-            // For the 'Key' field (required), the max DL is 3.
-            keyDefLevels.Add(3);
+            // --- THE CRITICAL CHANGE IS HERE ---
+            // For the 'Key' field, the max DL must be 4, just like the optional fields.
+            keyDefLevels.Add(4);
             keys.Add(element.Key);
 
             // For optional fields, the max DL is 4.
-            // If value is present: DL=4. Add value to list.
-            // If value is absent: DL=3 (struct exists, value does not). Do not add to value list.
             if (element.Value.StringValue != null) {
               stringDefLevels.Add(4);
               stringVals.Add(element.Value.StringValue);
@@ -129,7 +125,7 @@ namespace LogTapestry.Ingester
       var doubleField = (DataField)structField.Fields[3];
       var boolField = (DataField)structField.Fields[4];
 
-      // 5. Write columns with the correct levels
+      // 5. Write columns
       await groupWriter.WriteColumnAsync(new DataColumn(keyField, keys.ToArray(), keyDefLevels.ToArray(), repLevels.ToArray()));
       await groupWriter.WriteColumnAsync(new DataColumn(stringField, stringVals.ToArray(), stringDefLevels.ToArray(), repLevels.ToArray()));
       await groupWriter.WriteColumnAsync(new DataColumn(longField, longVals.ToArray(), longDefLevels.ToArray(), repLevels.ToArray()));
