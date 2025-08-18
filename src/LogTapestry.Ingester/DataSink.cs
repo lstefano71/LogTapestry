@@ -1,4 +1,3 @@
-
 using LogTapestry.Core;
 
 using Parquet;
@@ -33,6 +32,20 @@ namespace LogTapestry.Ingester
         )
     );
 
+    // Helper to compute repetition levels for a list of lists
+    private static int[] ComputeRepLevels(List<List<FieldElement>> fieldsList)
+    {
+      var repLevels = new List<int>();
+      foreach (var list in fieldsList)
+      {
+        for (int j = 0; j < list.Count; j++)
+        {
+          repLevels.Add(j == 0 ? 0 : 1);
+        }
+      }
+      return repLevels.ToArray();
+    }
+
     public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream)
     {
       using var parquetWriter = await ParquetWriter.CreateAsync(Schema, targetStream);
@@ -49,58 +62,45 @@ namespace LogTapestry.Ingester
           entry.Fields.Select(kv => {
             var key = kv.Key;
             var value = kv.Value;
-            if (value is long l)
-              return new FieldElement(key, new FieldValue(LongValue: l));
-            if (value is double d)
-              return new FieldElement(key, new FieldValue(DoubleValue: d));
-            if (value is bool b)
-              return new FieldElement(key, new FieldValue(BoolValue: b));
-            // Default to string
-            return new FieldElement(key, new FieldValue(StringValue: value?.ToString()));
+            return value switch
+            {
+                long l   => new FieldElement(key, new FieldValue(LongValue: l)),
+                double d => new FieldElement(key, new FieldValue(DoubleValue: d)),
+                bool b   => new FieldElement(key, new FieldValue(BoolValue: b)),
+                _        => new FieldElement(key, new FieldValue(StringValue: value?.ToString()))
+            };
           }).ToList()
       ).ToList();
 
       // Flatten for columnar writing
       var allElements = fieldsList.SelectMany(x => x);
       var keys = allElements.Select(e => e.Key);
-      var stringVals = allElements.Select(e => e.Value.StringValue ?? string.Empty);
-      // Create arrays of non-nullable values
+      var stringVals = allElements.Where(e => e.Value.StringValue != null).Select(e => e.Value.StringValue);
       var longVals = allElements.Where(e => e.Value.LongValue.HasValue).Select(e => e.Value.LongValue.Value);
       var doubleVals = allElements.Where(e => e.Value.DoubleValue.HasValue).Select(e => e.Value.DoubleValue.Value);
       var boolVals = allElements.Where(e => e.Value.BoolValue.HasValue).Select(e => e.Value.BoolValue.Value);
 
       // Build definition/repetition levels for Parquet list-of-struct
-      var defLevels = new List<int>();
-      var repLevels = new List<int>();
-
-      // These definition levels are for the nullability of the values themselves
+      var structDefLevels = new List<int>();
+      var stringDefLevels = new List<int>();
       var longDefLevels = new List<int>();
       var doubleDefLevels = new List<int>();
       var boolDefLevels = new List<int>();
 
-      for (int i = 0; i < fieldsList.Count; i++) {
-        var list = fieldsList[i];
-        if (list.Count == 0) {
-          // If a log entry has no fields, we should represent this with a lower definition level.
-          // This part can be enhanced depending on how empty lists should be represented.
-          // For simplicity, this example assumes lists are non-empty if present.
-        }
-        for (int j = 0; j < list.Count; j++) {
+      foreach (var list in fieldsList)
+      {
+        for (int j = 0; j < list.Count; j++)
+        {
           var element = list[j];
-          // Definition level '1' here means the struct 'FieldElement' itself is present.
-          defLevels.Add(1);
-
-          // Repetition level '0' for the start of a new list, '1' for subsequent items.
-          repLevels.Add(j == 0 ? 0 : 1);
-
-          // Now, build the definition levels for each nullable field within the struct.
-          // Level 2 means the value is present and not null.
-          // Level 1 would mean the value is null.
+          structDefLevels.Add(1);
+          stringDefLevels.Add(element.Value.StringValue != null ? 2 : 1);
           longDefLevels.Add(element.Value.LongValue.HasValue ? 2 : 1);
           doubleDefLevels.Add(element.Value.DoubleValue.HasValue ? 2 : 1);
           boolDefLevels.Add(element.Value.BoolValue.HasValue ? 2 : 1);
         }
       }
+
+      var structRepLevels = ComputeRepLevels(fieldsList);
 
       // Get DataFields for struct members
       var listField = (ListField)Schema.Fields[5];
@@ -111,12 +111,12 @@ namespace LogTapestry.Ingester
       var doubleField = (DataField)structField.Fields[3];
       var boolField = (DataField)structField.Fields[4];
 
-      // Write nested columns
-      await groupWriter.WriteColumnAsync(new DataColumn(keyField, keys.ToArray(), [.. defLevels], [.. repLevels]));
-      await groupWriter.WriteColumnAsync(new DataColumn(stringField, stringVals.ToArray(), [.. defLevels], [.. repLevels]));
-      await groupWriter.WriteColumnAsync(new DataColumn(longField, longVals.ToArray(), [.. defLevels], [.. repLevels]));
-      await groupWriter.WriteColumnAsync(new DataColumn(doubleField, doubleVals.ToArray(), [.. defLevels], [.. repLevels]));
-      await groupWriter.WriteColumnAsync(new DataColumn(boolField, boolVals.ToArray(), [.. defLevels], [.. repLevels]));
+      // Write nested columns with correct defLevels
+      await groupWriter.WriteColumnAsync(new DataColumn(keyField, keys.ToArray(), [.. structDefLevels], structRepLevels));
+      await groupWriter.WriteColumnAsync(new DataColumn(stringField, stringVals.ToArray(), [.. stringDefLevels], structRepLevels));
+      await groupWriter.WriteColumnAsync(new DataColumn(longField, longVals.ToArray(), [.. longDefLevels], structRepLevels));
+      await groupWriter.WriteColumnAsync(new DataColumn(doubleField, doubleVals.ToArray(), [.. doubleDefLevels], structRepLevels));
+      await groupWriter.WriteColumnAsync(new DataColumn(boolField, boolVals.ToArray(), [.. boolDefLevels], structRepLevels));
     }
   }
 }

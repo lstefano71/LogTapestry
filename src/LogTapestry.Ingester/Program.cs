@@ -11,27 +11,27 @@ namespace LogTapestry.Ingester
       var settings = new LogTapestrySettings {
         Ingester = new IngesterSettings {
           Directory = "d:\\devel\\LogTapestry\\sample-logs",
-          IncludePatterns = new List<string> { "*.log" }
+          IncludePatterns = ["*.log"]
         },
-        Plugins = new List<PluginSettings>
-          {
+        Plugins =
+          [
                     new PluginSettings
                     {
                         Type = "regex",
                         Name = "default",
-                        IncludePatterns = new List<string> { "*.log" },
+                        IncludePatterns = ["*.log"],
                         Config = new RegexPluginConfig
                         {
                             StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
                             TimestampRegex = @"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})",
                             LevelRegex = @" (INFO|WARN|ERROR) ",
-                            FieldsRegexes = new List<FieldRegex>
-                            {
+                            FieldsRegexes =
+                            [
                                 new FieldRegex { Regex = @"user_id (\d+)", FieldName = "user_id", Type = "long" }
-                            }
+                            ]
                         }
                     }
-                }
+                ]
       };
 
       var channel = Channel.CreateBounded<ParsingResult>(settings.Ingester.PipelineBufferCapacity);
