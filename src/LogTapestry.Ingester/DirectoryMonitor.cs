@@ -47,90 +47,94 @@ namespace LogTapestry.Ingester
 
     public async Task RunAsync(ChannelWriter<FileWorkItem> writer, System.Threading.CancellationToken token)
     {
-      await InitialScanAsync(writer);
+      try {
+        await InitialScanAsync(writer);
 
-      // Create matcher for include/exclude patterns
-      var matcher = new Matcher();
-      matcher.AddIncludePatterns(_settings.IncludePatterns);
-      matcher.AddExcludePatterns(_settings.ExcludePatterns);
+        // Create matcher for include/exclude patterns
+        var matcher = new Matcher();
+        matcher.AddIncludePatterns(_settings.IncludePatterns);
+        matcher.AddExcludePatterns(_settings.ExcludePatterns);
 
-      var watcher = new FileSystemWatcher(_settings.Directory, "*.*") {
-        IncludeSubdirectories = true,
-        EnableRaisingEvents = true,
-        InternalBufferSize = 64 * 1024
-      };
+        var watcher = new FileSystemWatcher(_settings.Directory, "*.*") {
+          IncludeSubdirectories = true,
+          EnableRaisingEvents = true,
+          InternalBufferSize = 64 * 1024
+        };
 
-      bool IsMatch(string path)
-      {
-        var dirRoot = new DirectoryInfo(_settings.Directory);
-        var relPath = Path.GetRelativePath(_settings.Directory, path);
-        var result = matcher.Match(relPath);
-        return result.HasMatches;
+        bool IsMatch(string path)
+        {
+          var dirRoot = new DirectoryInfo(_settings.Directory);
+          var relPath = Path.GetRelativePath(_settings.Directory, path);
+          var result = matcher.Match(relPath);
+          return result.HasMatches;
+        }
+
+        void OnChanged(object sender, FileSystemEventArgs e)
+        {
+          if (!IsMatch(e.FullPath)) return;
+          var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
+          if (fileIdObj == null) return;
+          var id = fileIdObj.FileId;
+          var diskWriteTime = File.GetLastWriteTimeUtc(e.FullPath).Ticks;
+          writer.TryWrite(new FileWorkItem {
+            Type = FileWorkType.FileChanged,
+            VolumeSerial = fileIdObj.VolumeSerial,
+            FileId = id,
+            FilePath = e.FullPath,
+            LastWriteTimeUtc = diskWriteTime
+          });
+        }
+
+        void OnCreated(object sender, FileSystemEventArgs e)
+        {
+          if (!IsMatch(e.FullPath)) return;
+          var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
+          if (fileIdObj == null) return;
+          var id = fileIdObj.FileId;
+          writer.TryWrite(new FileWorkItem {
+            Type = FileWorkType.FileAdded,
+            VolumeSerial = fileIdObj.VolumeSerial,
+            FileId = id,
+            FilePath = e.FullPath,
+            LastWriteTimeUtc = File.GetLastWriteTimeUtc(e.FullPath).Ticks
+          });
+        }
+
+        void OnDeleted(object sender, FileSystemEventArgs e)
+        {
+          // On deletion, we can't get file ID, so we rely on state reconciliation
+          // Trigger a full scan to resync
+          _ = InitialScanAsync(writer);
+        }
+
+        void OnRenamed(object sender, RenamedEventArgs e)
+        {
+          // Treat as deletion + creation
+          _ = InitialScanAsync(writer);
+        }
+
+        void OnError(object sender, ErrorEventArgs e)
+        {
+          // Resync on error
+          _ = InitialScanAsync(writer);
+        }
+
+        watcher.Changed += OnChanged;
+        watcher.Created += OnCreated;
+        watcher.Deleted += OnDeleted;
+        watcher.Renamed += OnRenamed;
+        watcher.Error += OnError;
+
+        // Keep alive until cancellation requested
+        while (!token.IsCancellationRequested) {
+          await Task.Delay(500, token);
+        }
+
+        watcher.EnableRaisingEvents = false;
+        watcher.Dispose();
+      } catch (TaskCanceledException) {
+        // Expected on shutdown, ignore
       }
-
-      void OnChanged(object sender, FileSystemEventArgs e)
-      {
-        if (!IsMatch(e.FullPath)) return;
-        var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
-        if (fileIdObj == null) return;
-        var id = fileIdObj.FileId;
-        var diskWriteTime = File.GetLastWriteTimeUtc(e.FullPath).Ticks;
-        writer.TryWrite(new FileWorkItem {
-          Type = FileWorkType.FileChanged,
-          VolumeSerial = fileIdObj.VolumeSerial,
-          FileId = id,
-          FilePath = e.FullPath,
-          LastWriteTimeUtc = diskWriteTime
-        });
-      }
-
-      void OnCreated(object sender, FileSystemEventArgs e)
-      {
-        if (!IsMatch(e.FullPath)) return;
-        var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
-        if (fileIdObj == null) return;
-        var id = fileIdObj.FileId;
-        writer.TryWrite(new FileWorkItem {
-          Type = FileWorkType.FileAdded,
-          VolumeSerial = fileIdObj.VolumeSerial,
-          FileId = id,
-          FilePath = e.FullPath,
-          LastWriteTimeUtc = File.GetLastWriteTimeUtc(e.FullPath).Ticks
-        });
-      }
-
-      void OnDeleted(object sender, FileSystemEventArgs e)
-      {
-        // On deletion, we can't get file ID, so we rely on state reconciliation
-        // Trigger a full scan to resync
-        _ = InitialScanAsync(writer);
-      }
-
-      void OnRenamed(object sender, RenamedEventArgs e)
-      {
-        // Treat as deletion + creation
-        _ = InitialScanAsync(writer);
-      }
-
-      void OnError(object sender, ErrorEventArgs e)
-      {
-        // Resync on error
-        _ = InitialScanAsync(writer);
-      }
-
-      watcher.Changed += OnChanged;
-      watcher.Created += OnCreated;
-      watcher.Deleted += OnDeleted;
-      watcher.Renamed += OnRenamed;
-      watcher.Error += OnError;
-
-      // Keep alive until cancellation requested
-      while (!token.IsCancellationRequested) {
-        await Task.Delay(500, token);
-      }
-
-      watcher.EnableRaisingEvents = false;
-      watcher.Dispose();
     }
 
     private async Task InitialScanAsync(ChannelWriter<FileWorkItem> writer)
