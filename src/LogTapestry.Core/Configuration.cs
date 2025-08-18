@@ -10,6 +10,7 @@ public class IngesterSettings
 {
   public string Directory { get; set; } = "";
   public List<string> IncludePatterns { get; set; } = [];
+  public List<string> ExcludePatterns { get; set; } = [];
   public int PipelineBufferCapacity { get; set; } = 10000;
   public int MaxParsingParallelism { get; set; } = Environment.ProcessorCount;
   public string DataRoot { get; set; } = "data";
@@ -22,6 +23,7 @@ public class PluginSettings
   public string Type { get; set; } = "";
   public string Name { get; set; } = "";
   public List<string> IncludePatterns { get; set; } = [];
+  public List<string> ExcludePatterns { get; set; } = [];
   public RegexPluginConfig Config { get; set; } = new();
 }
 

@@ -44,6 +44,14 @@ namespace LogTapestry.Core
                     FieldName TEXT PRIMARY KEY,
                     FieldType TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS ParquetFiles (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    FilePath TEXT NOT NULL,
+                    Partition TEXT NOT NULL,
+                    RowCount INTEGER NOT NULL,
+                    SizeBytes INTEGER NOT NULL,
+                    CreatedUtc INTEGER NOT NULL
+                );
             ";
       cmd.ExecuteNonQuery();
     }
@@ -143,6 +151,11 @@ namespace LogTapestry.Core
         return reader.GetString(0);
       }
       return null;
+    }
+
+    public SqliteConnection GetConnection()
+    {
+      return _connection;
     }
 
     public void Dispose()

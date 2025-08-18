@@ -1,6 +1,7 @@
 using LogTapestry.Core;
+
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
+
 using Parquet;
 using Parquet.Data;
 using Parquet.Schema;
@@ -38,12 +39,17 @@ public class DataSink
   );
 
   private readonly ILogger<DataSink> _logger;
-  public DataSink(ILogger<DataSink> logger)
+  private readonly IStateProvider? _stateProvider;
+  private readonly string? _partitionPath;
+
+  public DataSink(ILogger<DataSink> logger, IStateProvider? stateProvider = null, string? partitionPath = null)
   {
     _logger = logger;
+    _stateProvider = stateProvider;
+    _partitionPath = partitionPath;
   }
 
-  public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream)
+  public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream, string? parquetFilePath = null)
   {
     if (batch.Length > 0)
       _logger.LogDebug($"Writing batch of {batch.Length} log entries. First entry: {batch[0]}");
@@ -58,7 +64,6 @@ public class DataSink
     await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[3], batch.Select(e => e.Source).ToArray()));
     await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[4], batch.Select(e => e.TemplateHash).ToArray()));
 
-    // The main method remains clean
     var listField = (ListField)Schema.Fields[5];
     var shredder = new NestedListShredder(listField);
     shredder.Shred(batch);
@@ -71,6 +76,18 @@ public class DataSink
     Metrics.LogEntriesIngested += batch.Length;
     if (targetStream.CanSeek) {
       Metrics.BytesProcessed += targetStream.Length;
+    }
+
+    // Index Parquet file in SQLite
+    if (_stateProvider != null && parquetFilePath != null && _partitionPath != null && targetStream.CanSeek) {
+      var cmd = ((SqliteStateProvider)_stateProvider).GetConnection().CreateCommand();
+      cmd.CommandText = @"INSERT INTO ParquetFiles (FilePath, Partition, RowCount, SizeBytes, CreatedUtc) VALUES (@filePath, @partition, @rowCount, @sizeBytes, @createdUtc);";
+      cmd.Parameters.AddWithValue("@filePath", parquetFilePath);
+      cmd.Parameters.AddWithValue("@partition", _partitionPath);
+      cmd.Parameters.AddWithValue("@rowCount", batch.Length);
+      cmd.Parameters.AddWithValue("@sizeBytes", targetStream.Length);
+      cmd.Parameters.AddWithValue("@createdUtc", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+      await cmd.ExecuteNonQueryAsync();
     }
   }
 

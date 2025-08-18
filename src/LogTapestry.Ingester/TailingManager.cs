@@ -1,5 +1,7 @@
 // LogTapestry.Ingester/TailingManager.cs
 using LogTapestry.Core;
+
+using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Logging;
 
 using System.Collections.Concurrent;
@@ -12,16 +14,37 @@ namespace LogTapestry.Ingester
     private readonly ILogger _logger;
     private readonly IStateProvider _stateProvider;
     private readonly ConcurrentDictionary<ulong, CancellationTokenSource> _activeTailers = new();
-    private readonly PluginSettings _pluginSettings;
+    private readonly List<PluginSettings> _pluginSettingsList;
+    private readonly Dictionary<PluginSettings, Matcher> _pluginMatchers;
+    private readonly IngesterSettings _settings;
 
-    public TailingManager(IStateProvider stateProvider, PluginSettings pluginSettings, ILoggerFactory loggerFactory)
+    public TailingManager(IStateProvider stateProvider, List<PluginSettings> pluginSettingsList, ILoggerFactory loggerFactory, IngesterSettings settings)
     {
       _stateProvider = stateProvider;
-      _pluginSettings = pluginSettings;
+      _pluginSettingsList = pluginSettingsList;
       _logger = loggerFactory.CreateLogger("TailingManager");
+      _settings = settings;
+      _pluginMatchers = new Dictionary<PluginSettings, Matcher>();
+      foreach (var plugin in _pluginSettingsList) {
+        var matcher = new Matcher();
+        matcher.AddIncludePatterns(plugin.IncludePatterns);
+        matcher.AddExcludePatterns(plugin.ExcludePatterns);
+        _pluginMatchers[plugin] = matcher;
+      }
     }
 
-    public async Task RunAsync(ChannelReader<FileWorkItem> workChannel, 
+    private PluginSettings? GetPluginForFile(string filePath)
+    {
+      var relPath = Path.GetFileName(filePath); // Use file name for matching
+      foreach (var plugin in _pluginSettingsList) {
+        var matcher = _pluginMatchers[plugin];
+        if (matcher.Match(relPath).HasMatches)
+          return plugin;
+      }
+      return null;
+    }
+
+    public async Task RunAsync(ChannelReader<FileWorkItem> workChannel,
       ChannelWriter<ParsingResult> outputChannel, CancellationToken token)
     {
       await foreach (var workItem in workChannel.ReadAllAsync(token)) {
@@ -29,10 +52,15 @@ namespace LogTapestry.Ingester
           case FileWorkType.FileAdded:
           case FileWorkType.FileChanged:
             if (!_activeTailers.ContainsKey(workItem.FileId)) {
+              var plugin = GetPluginForFile(workItem.FilePath);
+              if (plugin == null) {
+                _logger.LogWarning("No plugin matched for file: {FilePath}", workItem.FilePath);
+                break;
+              }
               var tailerCts = CancellationTokenSource.CreateLinkedTokenSource(token);
               _activeTailers[workItem.FileId] = tailerCts;
-              _logger.LogDebug("Starting tailer for: {FilePath} (ID: {FileId})", workItem.FilePath, workItem.FileId);
-              _ = Task.Run(() => TailingTask(workItem, outputChannel, tailerCts.Token), token);
+              _logger.LogDebug("Starting tailer for: {FilePath} (ID: {FileId}) with plugin: {PluginName}", workItem.FilePath, workItem.FileId, plugin.Name);
+              _ = Task.Run(() => TailingTask(workItem, outputChannel, tailerCts.Token, plugin), token);
             }
             break;
           case FileWorkType.FileRemovedOrRotated:
@@ -45,7 +73,7 @@ namespace LogTapestry.Ingester
       }
     }
 
-    private async Task TailingTask(FileWorkItem workItem, ChannelWriter<ParsingResult> outputChannel, CancellationToken token)
+    private async Task TailingTask(FileWorkItem workItem, ChannelWriter<ParsingResult> outputChannel, CancellationToken token, PluginSettings plugin)
     {
       var tracked = await _stateProvider.GetTrackedFileAsync(workItem.FileId, workItem.VolumeSerial);
       long position = tracked?.Position ?? 0;
@@ -53,7 +81,7 @@ namespace LogTapestry.Ingester
       using var fs = new FileStream(workItem.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
       fs.Seek(position, SeekOrigin.Begin);
 
-      var parser = new RegexLogParser(_pluginSettings, workItem.FilePath);
+      var parser = new RegexLogParser(plugin, workItem.FilePath);
 
       while (!token.IsCancellationRequested) {
         var buffer = new List<string>();
@@ -86,7 +114,7 @@ namespace LogTapestry.Ingester
           };
         }
 
-        await Task.Delay(1000, token); // Polling interval
+        await Task.Delay(_settings.PollingIntervalMs, token); // Polling interval
 
         // Rotation check
         if (fs.Length < newPosition) {

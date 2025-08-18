@@ -1,5 +1,8 @@
 // LogTapestry.Ingester/DirectoryMonitor.cs
 using LogTapestry.Core;
+
+using Microsoft.Extensions.FileSystemGlobbing;
+using Microsoft.Extensions.FileSystemGlobbing.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -46,14 +49,28 @@ namespace LogTapestry.Ingester
     {
       await InitialScanAsync(writer);
 
-      var watcher = new FileSystemWatcher(_settings.Directory, "*.log") {
+      // Create matcher for include/exclude patterns
+      var matcher = new Matcher();
+      matcher.AddIncludePatterns(_settings.IncludePatterns);
+      matcher.AddExcludePatterns(_settings.ExcludePatterns);
+
+      var watcher = new FileSystemWatcher(_settings.Directory, "*.*") {
         IncludeSubdirectories = true,
         EnableRaisingEvents = true,
         InternalBufferSize = 64 * 1024
       };
 
+      bool IsMatch(string path)
+      {
+        var dirRoot = new DirectoryInfo(_settings.Directory);
+        var relPath = Path.GetRelativePath(_settings.Directory, path);
+        var result = matcher.Match(relPath);
+        return result.HasMatches;
+      }
+
       void OnChanged(object sender, FileSystemEventArgs e)
       {
+        if (!IsMatch(e.FullPath)) return;
         var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
         if (fileIdObj == null) return;
         var id = fileIdObj.FileId;
@@ -69,6 +86,7 @@ namespace LogTapestry.Ingester
 
       void OnCreated(object sender, FileSystemEventArgs e)
       {
+        if (!IsMatch(e.FullPath)) return;
         var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
         if (fileIdObj == null) return;
         var id = fileIdObj.FileId;
@@ -120,7 +138,15 @@ namespace LogTapestry.Ingester
       var trackedFiles = await _stateProvider.GetAllTrackedFilesAsync();
       var seen = new HashSet<ulong>();
 
-      foreach (var filePath in Directory.EnumerateFiles(_settings.Directory, "*.log", SearchOption.AllDirectories)) {
+      // Create matcher for include/exclude patterns
+      var matcher = new Matcher();
+      matcher.AddIncludePatterns(_settings.IncludePatterns);
+      matcher.AddExcludePatterns(_settings.ExcludePatterns);
+      var dirRoot = new DirectoryInfo(_settings.Directory);
+      var dirWrapper = new DirectoryInfoWrapper(dirRoot);
+      var matchResult = matcher.Execute(dirWrapper);
+      foreach (var file in matchResult.Files) {
+        var filePath = Path.Combine(_settings.Directory, file.Path);
         var fileIdObj = NtfsUtils.GetFileIdentifier(filePath);
         if (fileIdObj == null) continue;
         var id = fileIdObj.FileId;

@@ -31,7 +31,7 @@ namespace LogTapestry.Ingester
       _logger.LogInformation("MonitoringService starting.");
 
       var builder = WebApplication.CreateBuilder();
-      builder.WebHost.UseUrls("http://localhost:8080");
+      builder.WebHost.UseUrls(_settings.MonitoringUrl);
 
       var app = builder.Build();
 

@@ -47,7 +47,8 @@ class Program
         var rewrittenQuery = await queryRewriter.RewriteQueryAsync(query.Replace("{data_path}", dataPath.Replace("\\", "/")));
         AnsiConsole.MarkupLine($"[grey]Rewritten Query:[/] {rewrittenQuery}");
 
-        using var conn = new DuckDBConnection($"DataSource={databasePath}");
+        // Use DuckDB in-memory for Parquet queries
+        using var conn = new DuckDBConnection("DataSource=:memory:");
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = rewrittenQuery;

@@ -71,8 +71,9 @@ public class Program
     ));
     builder.Services.AddSingleton<TailingManager>(sp => new TailingManager(
       sp.GetRequiredService<IStateProvider>(),
-      sp.GetRequiredService<PluginSettings>(),
-      sp.GetRequiredService<ILoggerFactory>()
+      builder.Configuration.GetSection("Plugins").Get<List<PluginSettings>>() ?? new List<PluginSettings>(),
+      sp.GetRequiredService<ILoggerFactory>(),
+      sp.GetRequiredService<IOptions<IngesterSettings>>().Value
     ));
     builder.Services.AddSingleton<DataSink>(sp => new DataSink(sp.GetRequiredService<ILogger<DataSink>>()));
 

@@ -61,12 +61,10 @@ namespace LogTapestry.Compactor
     public async Task ExecuteCompaction(string partitionPath)
     {
       var landingPath = Path.Combine(partitionPath, "landing");
-      var tmpParquetPath = Path.Combine(partitionPath, "compacted.tmp.parquet");
-      var finalParquetPath = Path.Combine(partitionPath, "compacted.parquet");
       var markerPath = Path.Combine(partitionPath, "_COMPACTION_COMPLETE");
+      const long targetChunkSize = 128 * 1024 * 1024; // 128MB
 
       try {
-        // 1. Read all Parquet files in landing/ using DuckDB
         using var duckDbConn = new DuckDBConnection("DataSource=:memory:");
         duckDbConn.Open();
         var cmd = duckDbConn.CreateCommand();
@@ -76,7 +74,6 @@ namespace LogTapestry.Compactor
           cmd.ExecuteNonQuery();
         }
 
-        // 2. Stream data from DuckDB to Parquet.Net
         cmd.CommandText = "SELECT * FROM tmp;";
         using var reader = cmd.ExecuteReader();
         var schemaFields = new List<DataField>();
@@ -85,21 +82,30 @@ namespace LogTapestry.Compactor
         }
         var parquetSchema = new ParquetSchema(schemaFields);
 
-        using (var fs = File.Create(tmpParquetPath)) {
-          var parquetWriter = await ParquetWriter.CreateAsync(parquetSchema, fs);
-          // Write in row groups (streaming)
-          const int batchSize = 10000;
-          var batchRows = new List<object[]>();
-          while (reader.Read()) {
-            var row = new object[reader.FieldCount];
-            reader.GetValues(row);
-            batchRows.Add(row);
-            if (batchRows.Count >= batchSize) {
+        int fileIndex = 0;
+        long currentSize = 0;
+        var batchRows = new List<object[]>();
+        const int batchSize = 10000;
+        while (reader.Read()) {
+          var row = new object[reader.FieldCount];
+          reader.GetValues(row);
+          batchRows.Add(row);
+          currentSize += EstimateRowSize(row);
+          if (batchRows.Count >= batchSize || currentSize >= targetChunkSize) {
+            var chunkPath = Path.Combine(partitionPath, $"compacted.{fileIndex}.parquet");
+            using (var fs = File.Create(chunkPath)) {
+              var parquetWriter = await ParquetWriter.CreateAsync(parquetSchema, fs);
               await WriteRowGroupAsync(parquetWriter, parquetSchema, batchRows);
-              batchRows.Clear();
             }
+            batchRows.Clear();
+            currentSize = 0;
+            fileIndex++;
           }
-          if (batchRows.Count > 0) {
+        }
+        if (batchRows.Count > 0) {
+          var chunkPath = Path.Combine(partitionPath, $"compacted.{fileIndex}.parquet");
+          using (var fs = File.Create(chunkPath)) {
+            var parquetWriter = await ParquetWriter.CreateAsync(parquetSchema, fs);
             await WriteRowGroupAsync(parquetWriter, parquetSchema, batchRows);
           }
         }
@@ -107,16 +113,10 @@ namespace LogTapestry.Compactor
         // 4. Delete landing/ directory
         Directory.Delete(landingPath, true);
 
-        // 5. Rename .tmp files to .parquet
-        File.Move(tmpParquetPath, finalParquetPath);
-
-        // 6. Create _COMPACTION_COMPLETE marker file
+        // 5. Create _COMPACTION_COMPLETE marker file
         File.WriteAllText(markerPath, "done");
       } catch (Exception ex) {
         Console.Error.WriteLine($"Compaction error for {partitionPath}: {ex}");
-        // Cleanup temp files
-        if (File.Exists(tmpParquetPath))
-          File.Delete(tmpParquetPath);
       }
 
       await Task.CompletedTask;
@@ -155,6 +155,19 @@ namespace LogTapestry.Compactor
       if (type == typeof(DateTime)) return new DataField<DateTime>(name);
       // Fallback to string for unknown types
       return new DataField<string>(name);
+    }
+
+    private long EstimateRowSize(object[] row)
+    {
+      long size = 0;
+      foreach (var val in row) {
+        if (val is string s) size += s.Length;
+        else if (val is long || val is int || val is double || val is float) size += 8;
+        else if (val is bool) size += 1;
+        else if (val is DateTime) size += 8;
+        else if (val != null) size += 16;
+      }
+      return size;
     }
   }
 }
