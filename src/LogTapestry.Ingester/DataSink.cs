@@ -8,6 +8,13 @@ namespace LogTapestry.Ingester;
 
 public class DataSink
 {
+  // Metrics instrumentation
+  public static class Metrics
+  {
+    public static long LogEntriesIngested = 0;
+    public static long BytesProcessed = 0;
+  }
+
   // Helper records and Schema remain the same...
   public record FieldValue(string? StringValue = null, long? LongValue = null, double? DoubleValue = null, bool? BoolValue = null);
   public record FieldElement(string Key, FieldValue Value);
@@ -48,6 +55,12 @@ public class DataSink
 
     foreach (var dataColumn in shredder.GetDataColumns()) {
       await groupWriter.WriteColumnAsync(dataColumn);
+    }
+
+    // Metrics instrumentation
+    Metrics.LogEntriesIngested += batch.Length;
+    if (targetStream.CanSeek) {
+      Metrics.BytesProcessed += targetStream.Length;
     }
   }
 

@@ -1,93 +1,65 @@
+// C#
 using LogTapestry.Core;
 
-using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+using Serilog;
 
 namespace LogTapestry.Ingester
 {
-  class Program
+  public class Program
   {
-    static async Task Main(string[] args)
+    public static async Task Main(string[] args)
     {
-      var settings = new LogTapestrySettings {
-        Ingester = new IngesterSettings {
-          Directory = "d:\\devel\\LogTapestry\\sample-logs",
-          IncludePatterns = new List<string> { "*.log" }
-        },
-        Plugins = new List<PluginSettings>
-          {
-            new PluginSettings
-            {
-                Type = "regex",
-                Name = "default",
-                IncludePatterns = new List<string> { "*.log" },
-                Config = new RegexPluginConfig
-                {
-                    StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
-                    TimestampRegex = @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)",
-                    TimestampIsUtc = true,
-                    LevelRegex = @"\b(INFO|WARN|ERROR)\b",
-                    FieldsRegexes = new List<FieldRegex>
-                    {
-                        new FieldRegex { Regex = @"user_id=(\d+)", FieldName = "user_id", Type = "long" },
-                        new FieldRegex { Regex = @"order_id=(\d+)", FieldName = "order_id", Type = "long" },
-                        new FieldRegex { Regex = @"free_space=(\d+)", FieldName = "free_space", Type = "long" },
-                        new FieldRegex { Regex = @"username=""([^""]+)""", FieldName = "username" },
-                        new FieldRegex { Regex = @"reason=""([^""]+)""", FieldName = "reason" },
-                        new FieldRegex { Regex = @"details=""([^""]+)""", FieldName = "details" }
-                    }
-                }
-            }
-        }
-      };
+      bool validate = args.Contains("--validate");
 
-      var stateProvider = new SqliteStateProvider("state.sqlite");
-      var fileWorkChannel = Channel.CreateUnbounded<FileWorkItem>();
-      var parsingResultChannel = Channel.CreateUnbounded<ParsingResult>();
+      var builder = Host.CreateApplicationBuilder(args);
 
-      var directoryMonitor = new DirectoryMonitor(settings.Ingester, stateProvider);
-      var tailingManager = new TailingManager(stateProvider);
-
-      var cts = new CancellationTokenSource();
-
-      var monitorTask = directoryMonitor.RunAsync(fileWorkChannel.Writer, cts.Token);
-      var tailingTask = tailingManager.RunAsync(fileWorkChannel.Reader, parsingResultChannel.Writer, cts.Token);
-
-      var consumer = Task.Run(async () => {
-        var batch = new List<LogEntry>();
-        await foreach (var result in parsingResultChannel.Reader.ReadAllAsync(cts.Token)) {
-          if (result.IsSuccess && result.Entry != null) {
-            batch.Add(result.Entry);
-            if (batch.Count >= 100) {
-              await WriteBatch(batch);
-              batch.Clear();
-            }
-          } else {
-            Console.WriteLine($"Error parsing line: {result.ErrorMessage} - {result.UnparseableText}");
-          }
-        }
-        if (batch.Count > 0) {
-          await WriteBatch(batch);
-        }
+      // Configure Serilog
+      builder.Services.AddSerilog((_, logConfig) => {
+        logConfig
+            .WriteTo.Console()
+            .WriteTo.File("logs/ingester-.log", rollingInterval: Serilog.RollingInterval.Day)
+            .WriteTo.File("logs/ingester-errors-.json", rollingInterval: Serilog.RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning, formatProvider: null);
       });
 
-      await Task.WhenAll(monitorTask, tailingTask, consumer);
-    }
+      // Bind configuration
+      builder.Services.Configure<LogTapestrySettings>(builder.Configuration.GetSection(""));
 
-    private static async Task WriteBatch(List<LogEntry> batch)
-    {
-      Directory.CreateDirectory("data");
-      foreach (var entry in batch) {
-        Console.WriteLine($"Timestamp: {entry.Timestamp}\nLevel: {entry.Level}\nMessage: {entry.Message}\nSource: {entry.Source}\nTemplateHash: {entry.TemplateHash}");
-        Console.WriteLine("Fields:");
-        foreach (var field in entry.Fields) {
-          var valueType = field.Value?.GetType().Name ?? "null";
-          Console.WriteLine($"  {field.Key}: {field.Value} (Type: {valueType})");
+      // Register services
+      builder.Services.AddSingleton<IStateProvider, SqliteStateProvider>();
+      builder.Services.AddSingleton<DirectoryMonitor>();
+      builder.Services.AddSingleton<TailingManager>();
+      builder.Services.AddSingleton<DataSink>();
+
+      // Register hosted services
+      builder.Services.AddHostedService<IngesterService>();
+      builder.Services.AddHostedService<MonitoringService>();
+
+      // Enable Windows Service
+      builder.Services.AddWindowsService(options => options.ServiceName = "LogTapestry Ingester");
+
+      var host = builder.Build();
+
+      if (validate) {
+        try {
+          var config = builder.Configuration;
+          var directory = config.GetSection("Ingester:Directory").Value;
+          if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory)) {
+            Console.WriteLine($"Validation failed: Directory '{directory}' does not exist.");
+            Environment.Exit(1);
+          }
+          // Add more validation as needed
+          Console.WriteLine("Configuration validation succeeded.");
+          Environment.Exit(0);
+        } catch (Exception ex) {
+          Console.WriteLine($"Validation failed: {ex.Message}");
+          Environment.Exit(1);
         }
-        Console.WriteLine(new string('-', 40));
+      } else {
+        await host.RunAsync();
       }
-      var dataSink = new DataSink();
-      using var stream = new FileStream("data/output.parquet", FileMode.Create);
-      await dataSink.WriteBatchAsync([.. batch], stream);
     }
   }
 }
