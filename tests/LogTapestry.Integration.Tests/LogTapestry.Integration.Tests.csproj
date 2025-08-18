@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\LogTapestry.Ingester\LogTapestry.Ingester.csproj" />
+    <ProjectReference Include="..\..\src\LogTapestry.Compactor\LogTapestry.Compactor.csproj" />
   </ItemGroup>
 
 </Project>
