@@ -15,23 +15,29 @@ namespace LogTapestry.Ingester
         },
         Plugins =
           [
-                    new PluginSettings
-                    {
-                        Type = "regex",
-                        Name = "default",
-                        IncludePatterns = ["*.log"],
-                        Config = new RegexPluginConfig
-                        {
-                            StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
-                            TimestampRegex = @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)",
-                            LevelRegex = @" (INFO|WARN|ERROR) ",
-                            FieldsRegexes =
-                            [
-                                new FieldRegex { Regex = @"user_id (\d+)", FieldName = "user_id", Type = "long" }
-                            ]
-                        }
-                    }
-                ]
+            new PluginSettings {
+              Type = "regex",
+              Name = "default",
+              IncludePatterns = ["*.log"],
+              Config = new RegexPluginConfig
+              {
+                  StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
+                  TimestampRegex = @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)",
+                  TimestampIsUtc = true,
+                  LevelRegex = @"\b(INFO|WARN|ERROR)\b",
+                  FieldsRegexes =
+                  [
+                      new FieldRegex { Regex = @"user_id=(\d+)", FieldName = "user_id", Type = "long" },
+                      new FieldRegex { Regex = @"order_id=(\d+)", FieldName = "order_id", Type = "long" },
+                      new FieldRegex { Regex = @"free_space=(\d+)", FieldName = "free_space", Type = "long" },
+                      new FieldRegex { Regex = @"username=""([^""]+)""", FieldName = "username" },
+                      new FieldRegex { Regex = @"reason=""([^""]+)""", FieldName = "reason" },
+                      new FieldRegex { Regex = @"details=""([^""]+)""", FieldName = "details" }
+
+                  ]
+              }
+           }
+         ]
       };
 
       var channel = Channel.CreateBounded<ParsingResult>(settings.Ingester.PipelineBufferCapacity);
@@ -76,6 +82,15 @@ namespace LogTapestry.Ingester
     private static async Task WriteBatch(List<LogEntry> batch)
     {
       Directory.CreateDirectory("data");
+      foreach (var entry in batch) {
+        Console.WriteLine($"Timestamp: {entry.Timestamp}\nLevel: {entry.Level}\nMessage: {entry.Message}\nSource: {entry.Source}\nTemplateHash: {entry.TemplateHash}");
+        Console.WriteLine("Fields:");
+        foreach (var field in entry.Fields) {
+          var valueType = field.Value?.GetType().Name ?? "null";
+          Console.WriteLine($"  {field.Key}: {field.Value} (Type: {valueType})");
+        }
+        Console.WriteLine(new string('-', 40));
+      }
       var dataSink = new DataSink();
       using var stream = new FileStream("data/output.parquet", FileMode.Append);
       await dataSink.WriteBatchAsync([.. batch], stream);

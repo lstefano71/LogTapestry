@@ -47,46 +47,23 @@ namespace LogTapestry.Core
     private LogEntry StartNewEntry(string line)
     {
       _multiLineBuffer.Clear();
-      _multiLineBuffer.Append(line);
+      _multiLineBuffer.AppendLine(line); // Always append with EOL
 
       var timestamp = DateTime.MinValue;
       var level = "UNKNOWN";
       var message = line;
+      // Fields will be extracted in FinalizeEntry from the full message
       var fields = new Dictionary<string, object>();
 
       if (!string.IsNullOrEmpty(_settings.Config.TimestampRegex)) {
         var match = Regex.Match(line, _settings.Config.TimestampRegex);
         if (match.Success) {
           if (DateTime.TryParse(match.Groups[1].Value, out var parsedTimestamp)) {
-            timestamp = parsedTimestamp;
-          }
-        }
-      }
-
-      if (!string.IsNullOrEmpty(_settings.Config.LevelRegex)) {
-        var match = Regex.Match(line, _settings.Config.LevelRegex);
-        if (match.Success) {
-          level = match.Groups[1].Value;
-        }
-      }
-
-      if (_settings.Config.FieldsRegexes != null) {
-        foreach (var fieldRegex in _settings.Config.FieldsRegexes) {
-          if (fieldRegex.Regex == null || fieldRegex.FieldName == null) continue;
-          var match = Regex.Match(line, fieldRegex.Regex);
-          if (match.Success) {
-            var valueStr = match.Groups[1].Value;
-            object value = valueStr;
-            if (fieldRegex.Type == "long") {
-              if (long.TryParse(valueStr, out var longValue)) {
-                value = longValue;
-              }
-            } else if (fieldRegex.Type == "double") {
-              if (double.TryParse(valueStr, out var doubleValue)) {
-                value = doubleValue;
-              }
+            if (_settings.Config.TimestampIsUtc) {
+              timestamp = DateTime.SpecifyKind(parsedTimestamp, DateTimeKind.Utc);
+            } else {
+              timestamp = parsedTimestamp;
             }
-            fields[fieldRegex.FieldName] = value;
           }
         }
       }
@@ -96,9 +73,42 @@ namespace LogTapestry.Core
 
     private ParsingResult FinalizeEntry()
     {
-      var finalMessage = _multiLineBuffer.ToString();
+      // Remove trailing EOL if present
+      var finalMessage = _multiLineBuffer.ToString().TrimEnd('\r', '\n');
       if (_inProgressEntry != null) {
-        var entry = _inProgressEntry with { Message = finalMessage };
+        // Extract fields from the full message
+        var fields = new Dictionary<string, object>();
+        if (_settings.Config.FieldsRegexes != null) {
+          foreach (var fieldRegex in _settings.Config.FieldsRegexes) {
+            if (string.IsNullOrEmpty(fieldRegex.Regex) || string.IsNullOrEmpty(fieldRegex.FieldName)) continue;
+            var matches = Regex.Matches(finalMessage, fieldRegex.Regex);
+            if (matches.Count > 0) {
+              // Use the last match (in case of multiple occurrences)
+              var match = matches[^1];
+              var valueStr = match.Groups[1].Value;
+              object value = valueStr;
+              if (fieldRegex.Type == "long") {
+                if (long.TryParse(valueStr, out var longValue)) {
+                  value = longValue;
+                }
+              } else if (fieldRegex.Type == "double") {
+                if (double.TryParse(valueStr, out var doubleValue)) {
+                  value = doubleValue;
+                }
+              }
+              fields[fieldRegex.FieldName] = value;
+            }
+          }
+        }
+        // Extract level from the full message
+        var level = _inProgressEntry.Level;
+        if (!string.IsNullOrEmpty(_settings.Config.LevelRegex)) {
+          var match = Regex.Match(finalMessage, _settings.Config.LevelRegex);
+          if (match.Success) {
+            level = match.Groups[1].Value;
+          }
+        }
+        var entry = _inProgressEntry with { Message = finalMessage, Fields = fields, Level = level };
         _inProgressEntry = null;
         _multiLineBuffer.Clear();
         return ParsingResult.Success(entry);

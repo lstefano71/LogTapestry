@@ -28,6 +28,7 @@ namespace LogTapestry.Core
     public string TimestampRegex { get; set; } = "";
     public string LevelRegex { get; set; } = "";
     public List<FieldRegex> FieldsRegexes { get; set; } = [];
+    public bool TimestampIsUtc { get; set; } = false;
   }
 
   public class FieldRegex

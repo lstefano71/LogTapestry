@@ -31,31 +31,21 @@ namespace LogTapestry.Ingester
             )
         )
     );
-
-    // Helper to compute repetition levels for a list of lists
-    private static int[] ComputeRepLevels(List<List<FieldElement>> fieldsList)
-    {
-      var repLevels = new List<int>();
-      foreach (var list in fieldsList) {
-        for (int j = 0; j < list.Count; j++) {
-          repLevels.Add(j == 0 ? 0 : 1);
-        }
-      }
-      return repLevels.ToArray();
-    }
-
     public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream)
     {
       using var parquetWriter = await ParquetWriter.CreateAsync(Schema, targetStream);
       using var groupWriter = parquetWriter.CreateRowGroup();
 
+      // Write top-level columns
       await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[0], batch.Select(e => e.Timestamp).ToArray()));
       await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[1], batch.Select(e => e.Level).ToArray()));
       await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[2], batch.Select(e => e.Message).ToArray()));
       await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[3], batch.Select(e => e.Source).ToArray()));
       await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[4], batch.Select(e => e.TemplateHash).ToArray()));
 
-      // Shred dynamic fields into List<FieldElement>
+      // --- Start of Corrected Section ---
+
+      // 1. Shred dynamic fields
       var fieldsList = batch.Select(entry =>
           entry.Fields.Select(kv => {
             var key = kv.Key;
@@ -69,35 +59,68 @@ namespace LogTapestry.Ingester
           }).ToList()
       ).ToList();
 
-      // Flatten for columnar writing
-      var allElements = fieldsList.SelectMany(x => x);
-      var keys = allElements.Select(e => e.Key);
-      var stringVals = allElements.Where(e => e.Value.StringValue != null).Select(e => e.Value.StringValue);
-      var longVals = allElements.Where(e => e.Value.LongValue.HasValue).Select(e => e.Value.LongValue.Value);
-      var doubleVals = allElements.Where(e => e.Value.DoubleValue.HasValue).Select(e => e.Value.DoubleValue.Value);
-      var boolVals = allElements.Where(e => e.Value.BoolValue.HasValue).Select(e => e.Value.BoolValue.Value);
-
-      // Build definition/repetition levels for Parquet list-of-struct
-      var structDefLevels = new List<int>();
+      // 2. Initialize lists for levels and non-null values
+      var repLevels = new List<int>();
+      var keyDefLevels = new List<int>();
       var stringDefLevels = new List<int>();
       var longDefLevels = new List<int>();
       var doubleDefLevels = new List<int>();
       var boolDefLevels = new List<int>();
 
+      var keys = new List<string>();
+      var stringVals = new List<string>();
+      var longVals = new List<long>();
+      var doubleVals = new List<double>();
+      var boolVals = new List<bool>();
+
+      // 3. Iterate and build all lists according to the 3-LEVEL LIST specification
       foreach (var list in fieldsList) {
-        for (int j = 0; j < list.Count; j++) {
-          var element = list[j];
-          structDefLevels.Add(1);
-          stringDefLevels.Add(element.Value.StringValue != null ? 2 : 1);
-          longDefLevels.Add(element.Value.LongValue.HasValue ? 2 : 1);
-          doubleDefLevels.Add(element.Value.DoubleValue.HasValue ? 2 : 1);
-          boolDefLevels.Add(element.Value.BoolValue.HasValue ? 2 : 1);
+        if (list.Count == 0) {
+          // This record has an empty list. DL=1 signifies the list exists but is empty.
+          // RL=0 because this is the first (and only) entry for this record's list.
+          repLevels.Add(0);
+          keyDefLevels.Add(1);
+          stringDefLevels.Add(1);
+          longDefLevels.Add(1);
+          doubleDefLevels.Add(1);
+          boolDefLevels.Add(1);
+        } else {
+          for (int j = 0; j < list.Count; j++) {
+            var element = list[j];
+            // RL=0 for the first element in a record's list, 1 for subsequent elements.
+            repLevels.Add(j == 0 ? 0 : 1);
+
+            // For the 'Key' field (required), the max DL is 3.
+            keyDefLevels.Add(3);
+            keys.Add(element.Key);
+
+            // For optional fields, the max DL is 4.
+            // If value is present: DL=4. Add value to list.
+            // If value is absent: DL=3 (struct exists, value does not). Do not add to value list.
+            if (element.Value.StringValue != null) {
+              stringDefLevels.Add(4);
+              stringVals.Add(element.Value.StringValue);
+            } else { stringDefLevels.Add(3); }
+
+            if (element.Value.LongValue.HasValue) {
+              longDefLevels.Add(4);
+              longVals.Add(element.Value.LongValue.Value);
+            } else { longDefLevels.Add(3); }
+
+            if (element.Value.DoubleValue.HasValue) {
+              doubleDefLevels.Add(4);
+              doubleVals.Add(element.Value.DoubleValue.Value);
+            } else { doubleDefLevels.Add(3); }
+
+            if (element.Value.BoolValue.HasValue) {
+              boolDefLevels.Add(4);
+              boolVals.Add(element.Value.BoolValue.Value);
+            } else { boolDefLevels.Add(3); }
+          }
         }
       }
 
-      var structRepLevels = ComputeRepLevels(fieldsList);
-
-      // Get DataFields for struct members
+      // 4. Get DataFields
       var listField = (ListField)Schema.Fields[5];
       var structField = (StructField)listField.Item;
       var keyField = (DataField)structField.Fields[0];
@@ -106,12 +129,12 @@ namespace LogTapestry.Ingester
       var doubleField = (DataField)structField.Fields[3];
       var boolField = (DataField)structField.Fields[4];
 
-      // Write nested columns with correct defLevels
-      await groupWriter.WriteColumnAsync(new DataColumn(keyField, keys.ToArray(), [.. structDefLevels], structRepLevels));
-      await groupWriter.WriteColumnAsync(new DataColumn(stringField, stringVals.ToArray(), [.. stringDefLevels], structRepLevels));
-      await groupWriter.WriteColumnAsync(new DataColumn(longField, longVals.ToArray(), [.. longDefLevels], structRepLevels));
-      await groupWriter.WriteColumnAsync(new DataColumn(doubleField, doubleVals.ToArray(), [.. doubleDefLevels], structRepLevels));
-      await groupWriter.WriteColumnAsync(new DataColumn(boolField, boolVals.ToArray(), [.. boolDefLevels], structRepLevels));
+      // 5. Write columns with the correct levels
+      await groupWriter.WriteColumnAsync(new DataColumn(keyField, keys.ToArray(), keyDefLevels.ToArray(), repLevels.ToArray()));
+      await groupWriter.WriteColumnAsync(new DataColumn(stringField, stringVals.ToArray(), stringDefLevels.ToArray(), repLevels.ToArray()));
+      await groupWriter.WriteColumnAsync(new DataColumn(longField, longVals.ToArray(), longDefLevels.ToArray(), repLevels.ToArray()));
+      await groupWriter.WriteColumnAsync(new DataColumn(doubleField, doubleVals.ToArray(), doubleDefLevels.ToArray(), repLevels.ToArray()));
+      await groupWriter.WriteColumnAsync(new DataColumn(boolField, boolVals.ToArray(), boolDefLevels.ToArray(), repLevels.ToArray()));
     }
   }
 }
