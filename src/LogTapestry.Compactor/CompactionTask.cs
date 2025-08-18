@@ -76,7 +76,7 @@ namespace LogTapestry.Compactor
           cmd.ExecuteNonQuery();
         }
 
-        // 2. Rewrite data into DataColumn arrays for Parquet.Net
+        // 2. Stream data from DuckDB to Parquet.Net
         cmd.CommandText = "SELECT * FROM tmp;";
         using var reader = cmd.ExecuteReader();
         var schemaFields = new List<DataField>();
@@ -84,24 +84,23 @@ namespace LogTapestry.Compactor
           schemaFields.Add(CreateDataField(reader.GetName(i), reader.GetFieldType(i)));
         }
         var parquetSchema = new ParquetSchema(schemaFields);
-        var rows = new List<object[]>();
-        while (reader.Read()) {
-          var row = new object[reader.FieldCount];
-          reader.GetValues(row);
-          rows.Add(row);
-        }
-        var columns = new List<DataColumn>();
-        foreach (var colIdx in Enumerable.Range(0, reader.FieldCount)) {
-          var colData = rows.Select(r => r[colIdx]).ToArray();
-          columns.Add(new DataColumn(parquetSchema.DataFields[colIdx], colData));
-        }
 
-        // 3. Write new large Parquet files with .tmp extension
         using (var fs = File.Create(tmpParquetPath)) {
           var parquetWriter = await ParquetWriter.CreateAsync(parquetSchema, fs);
-          using var groupWriter = parquetWriter.CreateRowGroup();
-          foreach (var col in columns) {
-            await groupWriter.WriteColumnAsync(col);
+          // Write in row groups (streaming)
+          const int batchSize = 10000;
+          var batchRows = new List<object[]>();
+          while (reader.Read()) {
+            var row = new object[reader.FieldCount];
+            reader.GetValues(row);
+            batchRows.Add(row);
+            if (batchRows.Count >= batchSize) {
+              await WriteRowGroupAsync(parquetWriter, parquetSchema, batchRows);
+              batchRows.Clear();
+            }
+          }
+          if (batchRows.Count > 0) {
+            await WriteRowGroupAsync(parquetWriter, parquetSchema, batchRows);
           }
         }
 
@@ -123,6 +122,15 @@ namespace LogTapestry.Compactor
       await Task.CompletedTask;
     }
 
+    private async Task WriteRowGroupAsync(ParquetWriter parquetWriter, ParquetSchema schema, List<object[]> rows)
+    {
+      using var groupWriter = parquetWriter.CreateRowGroup();
+      foreach (var colIdx in Enumerable.Range(0, schema.DataFields.Length)) {
+        var colData = rows.Select(r => r[colIdx]).ToArray();
+        var column = new DataColumn(schema.DataFields[colIdx], colData);
+        await groupWriter.WriteColumnAsync(column);
+      }
+    }
     private TimeSpan ParseTimeSpan(string input)
     {
       // Simple parser: "1h", "2d", "30m"

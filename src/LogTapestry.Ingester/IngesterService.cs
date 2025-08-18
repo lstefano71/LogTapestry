@@ -11,38 +11,30 @@ namespace LogTapestry.Ingester
   public class IngesterService : IHostedService
   {
     private readonly ILogger<IngesterService> _logger;
-    private DirectoryMonitor _directoryMonitor;
-    private TailingManager _tailingManager;
-    private Task _monitorTask;
-    private Task _tailingTask;
-    private Channel<FileWorkItem> _workChannel;
-    private Channel<ParsingResult> _outputChannel;
-    private CancellationTokenSource _cts;
+    private readonly LogTapestrySettings _settings;
+    private DirectoryMonitor? _directoryMonitor;
+    private TailingManager? _tailingManager;
+    private Task? _monitorTask;
+    private Task? _tailingTask;
+    private Channel<FileWorkItem>? _workChannel;
+    private Channel<ParsingResult>? _outputChannel;
+    private CancellationTokenSource? _cts;
 
-    public IngesterService(ILogger<IngesterService> logger)
+    public IngesterService(ILogger<IngesterService> logger, Microsoft.Extensions.Options.IOptions<LogTapestrySettings> options)
     {
       _logger = logger;
+      _settings = options.Value;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
       _logger.LogInformation("IngesterService starting.");
 
-      // Load configuration from appsettings.json
-      var configText = File.ReadAllText("src/LogTapestry.Ingester/appsettings.json");
-      var configDoc = System.Text.Json.JsonDocument.Parse(configText);
-
-      var settings = new IngesterSettings {
-        Directory = configDoc.RootElement.GetProperty("Ingester").GetProperty("Directory").GetString() ?? "logs",
-        IncludePatterns = configDoc.RootElement.GetProperty("Ingester").GetProperty("IncludePatterns").EnumerateArray().Select(x => x.GetString() ?? "*.log").ToList()
-      };
-
-      var pluginElem = configDoc.RootElement.GetProperty("Plugins")[0];
-      var pluginSettings = System.Text.Json.JsonSerializer.Deserialize<PluginSettings>(pluginElem.GetRawText());
-
+      // Use DI-injected settings
       var stateProvider = new SqliteStateProvider("state.db");
-
-      _directoryMonitor = new DirectoryMonitor(settings, stateProvider);
+      var ingesterSettings = _settings.Ingester;
+      var pluginSettings = _settings.Plugins.Count > 0 ? _settings.Plugins[0] : new LogTapestry.Core.PluginSettings();
+      _directoryMonitor = new DirectoryMonitor(ingesterSettings, stateProvider);
       _tailingManager = new TailingManager(stateProvider, pluginSettings);
 
       _workChannel = Channel.CreateUnbounded<FileWorkItem>();

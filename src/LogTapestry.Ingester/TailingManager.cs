@@ -65,13 +65,22 @@ namespace LogTapestry.Ingester
         }
 
         var newPosition = fs.Position;
-        await _stateProvider.UpdateTrackedFileAsync(new TrackedFileInfo {
-          VolumeSerial = workItem.VolumeSerial,
-          FileId = workItem.FileId,
-          FilePath = workItem.FilePath,
-          Position = newPosition,
-          LastWriteTimeUtc = new DateTime(workItem.LastWriteTimeUtc)
-        });
+        if (tracked == null || newPosition != tracked.Position) {
+          await _stateProvider.UpdateTrackedFileAsync(new TrackedFileInfo {
+            VolumeSerial = workItem.VolumeSerial,
+            FileId = workItem.FileId,
+            FilePath = workItem.FilePath,
+            Position = newPosition,
+            LastWriteTimeUtc = new DateTime(workItem.LastWriteTimeUtc)
+          });
+          tracked = new TrackedFileInfo {
+            VolumeSerial = workItem.VolumeSerial,
+            FileId = workItem.FileId,
+            FilePath = workItem.FilePath,
+            Position = newPosition,
+            LastWriteTimeUtc = new DateTime(workItem.LastWriteTimeUtc)
+          };
+        }
 
         await Task.Delay(1000, token); // Polling interval
 
