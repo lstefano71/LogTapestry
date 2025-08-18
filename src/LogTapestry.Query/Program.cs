@@ -22,8 +22,8 @@ namespace LogTapestry.Query
       if (query.Contains("WHERE")) {
         // Example: SELECT * FROM logs WHERE user_id > 100
         var whereIndex = query.IndexOf("WHERE");
-        var selectPart = query.Substring(0, whereIndex);
-        var wherePart = query.Substring(whereIndex + "WHERE".Length).Trim();
+        var selectPart = query[..whereIndex];
+        var wherePart = query[(whereIndex + "WHERE".Length)..].Trim();
         rewrittenQuery = $"{selectPart}FROM {parquetSource} AS t WHERE EXISTS (SELECT 1 FROM UNNEST(t.Fields) AS f WHERE f.Key = 'user_id' AND f.LongValue > 100)";
       } else {
         rewrittenQuery = query.Replace("FROM logs", $"FROM {parquetSource}");
