@@ -87,11 +87,33 @@ namespace LogTapestry.Ingester
     private async Task WriteBatch(List<LogEntry> batch)
     {
       if (batch.Count == 0) return;
-      var path = Path.Combine("data", $"log_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid()}.parquet");
-      Directory.CreateDirectory("data");
-      await using var stream = File.Create(path);
-      await _dataSink.WriteBatchAsync(batch.ToArray(), stream);
-      _logger.LogInformation("Wrote batch of {Count} entries to {Path}", batch.Count, path);
+      try {
+        // Use the timestamp of the first entry for partitioning
+        var firstEntryTimestamp = batch[0].Timestamp.ToUniversalTime();
+        var dataRoot = _settings.Ingester.DataRoot ?? "data";
+        var partitionPath = Path.Combine(
+          dataRoot,
+          $"year={firstEntryTimestamp.Year}",
+          $"month={firstEntryTimestamp.Month:D2}",
+          $"day={firstEntryTimestamp.Day:D2}",
+          "landing"
+        );
+        Directory.CreateDirectory(partitionPath);
+        var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet.tmp");
+        var finalFilePath = Path.ChangeExtension(tempFilePath, ".parquet");
+        await using (var stream = File.Create(tempFilePath)) {
+          await _dataSink.WriteBatchAsync(batch.ToArray(), stream);
+        }
+        File.Move(tempFilePath, finalFilePath);
+        _logger.LogInformation(
+          "Wrote batch of {Count} entries to {Path}",
+          batch.Count,
+          finalFilePath
+        );
+      } catch (Exception ex) {
+        _logger.LogError(ex, "Failed to write batch of {Count} log entries. Data may be lost.", batch.Count);
+        // Optionally implement retry logic here
+      }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
