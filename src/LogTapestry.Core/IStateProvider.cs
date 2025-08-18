@@ -7,7 +7,9 @@ namespace LogTapestry.Core
     Task UpdateTrackedFileAsync(TrackedFileInfo info);
     Task RemoveTrackedFileAsync(ulong fileId, long volumeSerial);
     Task<Dictionary<ulong, TrackedFileInfo>> GetAllTrackedFilesAsync();
+    Task<string?> GetFieldTypeAsync(string fieldName);
     // Schema registry methods can be added here as needed
+    bool CheckHealth();
   }
 
   public class TrackedFileInfo

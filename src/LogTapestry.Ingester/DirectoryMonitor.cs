@@ -120,7 +120,7 @@ namespace LogTapestry.Ingester
         var id = fileIdObj.FileId;
         seen.Add(id);
 
-        if (!trackedFiles.ContainsKey(id)) {
+        if (!trackedFiles.TryGetValue(id, out TrackedFileInfo? tracked)) {
           Console.WriteLine($"[DirectoryMonitor] File added: {filePath} (ID: {id})");
           await writer.WriteAsync(new FileWorkItem {
             Type = FileWorkType.FileAdded,
@@ -130,7 +130,6 @@ namespace LogTapestry.Ingester
             LastWriteTimeUtc = File.GetLastWriteTimeUtc(filePath).Ticks
           });
         } else {
-          var tracked = trackedFiles[id];
           var diskWriteTime = File.GetLastWriteTimeUtc(filePath).Ticks;
           if (diskWriteTime > tracked.LastWriteTimeUtc.Ticks) {
             Console.WriteLine($"[DirectoryMonitor] File changed: {filePath} (ID: {id})");

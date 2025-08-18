@@ -14,6 +14,20 @@ namespace LogTapestry.Core
       EnsureSchema();
     }
 
+    public bool CheckHealth()
+    {
+      try {
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection(_connection.ConnectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        cmd.ExecuteScalar();
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     private void EnsureSchema()
     {
       var cmd = _connection.CreateCommand();
@@ -25,6 +39,10 @@ namespace LogTapestry.Core
                     Position INTEGER NOT NULL,
                     LastWriteTimeUtc INTEGER NOT NULL,
                     PRIMARY KEY (VolumeSerial, FileId)
+                );
+                CREATE TABLE IF NOT EXISTS FieldSchema (
+                    FieldName TEXT PRIMARY KEY,
+                    FieldType TEXT NOT NULL
                 );
             ";
       cmd.ExecuteNonQuery();
@@ -108,6 +126,23 @@ namespace LogTapestry.Core
         result[info.FileId] = info;
       }
       return result;
+    }
+
+    public async Task<string?> GetFieldTypeAsync(string fieldName)
+    {
+      var cmd = _connection.CreateCommand();
+      cmd.CommandText = @"
+                SELECT FieldType
+                FROM FieldSchema
+                WHERE FieldName = @fieldName
+            ";
+      cmd.Parameters.AddWithValue("@fieldName", fieldName);
+
+      using var reader = await cmd.ExecuteReaderAsync();
+      if (await reader.ReadAsync()) {
+        return reader.GetString(0);
+      }
+      return null;
     }
 
     public void Dispose()

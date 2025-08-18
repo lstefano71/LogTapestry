@@ -1,4 +1,6 @@
 // C#
+using LogTapestry.Core;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -12,10 +14,14 @@ namespace LogTapestry.Ingester
   public class MonitoringService : IHostedService
   {
     private readonly ILogger<MonitoringService> _logger;
+    private readonly IStateProvider _stateProvider;
+    private readonly IngesterSettings _settings;
 
-    public MonitoringService(ILogger<MonitoringService> logger)
+    public MonitoringService(ILogger<MonitoringService> logger, IStateProvider stateProvider, IngesterSettings settings)
     {
       _logger = logger;
+      _stateProvider = stateProvider;
+      _settings = settings;
     }
 
     private WebApplication? _webApp;
@@ -30,13 +36,22 @@ namespace LogTapestry.Ingester
       var app = builder.Build();
 
       app.MapGet("/health", () => {
-        // TODO: Inject IStateProvider and IngesterSettings for real checks
-        var dbHealthy = true; // Replace with actual DB check
-        var dirHealthy = true; // Replace with actual directory check
+        bool dbHealthy;
+        bool dirHealthy;
+        try {
+          dbHealthy = _stateProvider.CheckHealth();
+        } catch {
+          dbHealthy = false;
+        }
+        dirHealthy = Directory.Exists(_settings.Directory);
+
         if (dbHealthy && dirHealthy) {
           return Results.Json(new { status = "Healthy", timestamp = DateTime.UtcNow });
         } else {
-          return Results.Json(new { status = "Unhealthy", errors = new[] { "Database or directory check failed." } }, statusCode: 503);
+          var errors = new List<string>();
+          if (!dbHealthy) errors.Add("Database check failed.");
+          if (!dirHealthy) errors.Add("Directory check failed.");
+          return Results.Json(new { status = "Unhealthy", errors }, statusCode: 503);
         }
       });
 

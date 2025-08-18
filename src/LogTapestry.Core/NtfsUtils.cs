@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace LogTapestry.Core
 {
-  public static class NtfsUtils
+  public static partial class NtfsUtils
   {
     public record FileIdentifier(long VolumeSerial, ulong FileId);
 
@@ -36,7 +36,8 @@ namespace LogTapestry.Core
       public uint nFileIndexLow;
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetFileInformationByHandle(IntPtr hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetFileInformationByHandle(IntPtr hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
   }
 }
