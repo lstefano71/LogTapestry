@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "LogTapestry.Query": {
+      "commandName": "Project",
+      "commandLineArgs": "--data data \"SELECT * FROM logs WHERE user_id > 100\""
+    }
+  }
+}

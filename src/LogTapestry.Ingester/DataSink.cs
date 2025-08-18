@@ -36,10 +36,8 @@ namespace LogTapestry.Ingester
     private static int[] ComputeRepLevels(List<List<FieldElement>> fieldsList)
     {
       var repLevels = new List<int>();
-      foreach (var list in fieldsList)
-      {
-        for (int j = 0; j < list.Count; j++)
-        {
+      foreach (var list in fieldsList) {
+        for (int j = 0; j < list.Count; j++) {
           repLevels.Add(j == 0 ? 0 : 1);
         }
       }
@@ -62,12 +60,11 @@ namespace LogTapestry.Ingester
           entry.Fields.Select(kv => {
             var key = kv.Key;
             var value = kv.Value;
-            return value switch
-            {
-                long l   => new FieldElement(key, new FieldValue(LongValue: l)),
-                double d => new FieldElement(key, new FieldValue(DoubleValue: d)),
-                bool b   => new FieldElement(key, new FieldValue(BoolValue: b)),
-                _        => new FieldElement(key, new FieldValue(StringValue: value?.ToString()))
+            return value switch {
+              long l => new FieldElement(key, new FieldValue(LongValue: l)),
+              double d => new FieldElement(key, new FieldValue(DoubleValue: d)),
+              bool b => new FieldElement(key, new FieldValue(BoolValue: b)),
+              _ => new FieldElement(key, new FieldValue(StringValue: value?.ToString()))
             };
           }).ToList()
       ).ToList();
@@ -87,10 +84,8 @@ namespace LogTapestry.Ingester
       var doubleDefLevels = new List<int>();
       var boolDefLevels = new List<int>();
 
-      foreach (var list in fieldsList)
-      {
-        for (int j = 0; j < list.Count; j++)
-        {
+      foreach (var list in fieldsList) {
+        for (int j = 0; j < list.Count; j++) {
           var element = list[j];
           structDefLevels.Add(1);
           stringDefLevels.Add(element.Value.StringValue != null ? 2 : 1);

@@ -23,7 +23,7 @@ namespace LogTapestry.Ingester
                         Config = new RegexPluginConfig
                         {
                             StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
-                            TimestampRegex = @"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})",
+                            TimestampRegex = @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)",
                             LevelRegex = @" (INFO|WARN|ERROR) ",
                             FieldsRegexes =
                             [

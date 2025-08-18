@@ -16,8 +16,18 @@ namespace LogTapestry.Query
       var dataPath = args[1];
       var query = args[2];
 
-      // Simplified query rewriting for the PoC
-      var rewrittenQuery = query.Replace("FROM logs", $"FROM read_parquet('{dataPath.Replace("\\", "/")}/output.parquet')");
+      // UNNEST-based query rewriting for PoC
+      var parquetSource = $"read_parquet('{dataPath.Replace("\\", "/")}/output.parquet')";
+      string rewrittenQuery;
+      if (query.Contains("WHERE")) {
+        // Example: SELECT * FROM logs WHERE user_id > 100
+        var whereIndex = query.IndexOf("WHERE");
+        var selectPart = query.Substring(0, whereIndex);
+        var wherePart = query.Substring(whereIndex + "WHERE".Length).Trim();
+        rewrittenQuery = $"{selectPart}FROM {parquetSource} AS t WHERE EXISTS (SELECT 1 FROM UNNEST(t.Fields) AS f WHERE f.Key = 'user_id' AND f.LongValue > 100)";
+      } else {
+        rewrittenQuery = query.Replace("FROM logs", $"FROM {parquetSource}");
+      }
 
       using var duckDBConnection = new DuckDBConnection("Data Source=:memory:");
       duckDBConnection.Open();
