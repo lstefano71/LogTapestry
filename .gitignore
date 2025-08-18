@@ -107,3 +107,4 @@ StyleCopReport.xml
 Thumbs.db
 /data
 /state.sqlite
+/logs
