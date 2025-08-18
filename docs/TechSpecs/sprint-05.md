@@ -96,6 +96,7 @@ Two key Markdown documents will be created in a `/docs` directory and included i
     *   **Schema Discovery:** How to find out what fields are available to query.
     *   **Examples:** A library of common query examples (e.g., "Find the top 10 errors from yesterday," "Count logins by user").
     *   **Output Formats:** How to use the `--output` flag to get data in JSON or CSV for use in other tools.
+    *   **Advanced Queries:** A brief introduction to using `UNNEST` for complex queries, with examples.
 
 #### **3.5. Final Code Review**
 

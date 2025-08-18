@@ -111,18 +111,44 @@ A separate WAL is **not required**. The system's design provides an **at-least-o
 
 On restart after a crash, the ingester resumes reading from the last committed position, effectively replaying any data that was in memory at the time of the crash.
 
-### 3.2. Physical Storage (Parquet)
+### **3.2. Physical Storage (Parquet)
 
-* **Format:** Log data is stored in Apache Parquet files for high compression and fast analytical query performance.
-* **Partitioning:** The data directory is organized using **Hive Partitioning** (`year=YYYY/month=MM/day=DD/`), which allows the query engine to prune partitions and dramatically speed up time-based queries.
-* **Schema:** To efficiently store dynamic fields, the Parquet files use a **multi-map schema**.
+The multi-map schema is **superseded**. We will now use a single `fields` column that is a `List` of a complex `Struct`, which is a more robust and flexible approach.
+
+* **Format:** Apache Parquet.
+* **Partitioning:** Hive Partitioning (`year=YYYY/month=MM/day=DD/`) remains in effect.
+* **Revised Schema:**
   * `timestamp` (Timestamp), `level` (String), `source` (String), `message` (String)
-  * `template_hash` (Long): A 64-bit hash of the log message template for fast grouping.
-  * `fields_string` (Map<String, String>)
-  * `fields_long` (Map<String, Long>)
-  * `fields_double` (Map<String, Double>)
-  * `fields_boolean` (Map<String, Boolean>)
-  * `fields_fallback` (Map<String, String>): For values that conflict with an established field type.
+  * `template_hash` (Long)
+  * **`fields` (List<Struct>):** A single column to hold all dynamic fields. The structure is defined as:
+    * `element` (Struct)
+      * `key` (String)
+      * `value` (Struct)
+        * `string_value` (Nullable String)
+        * `long_value` (Nullable Long)
+        * `double_value` (Nullable Double)
+        * `boolean_value` (Nullable Boolean)
+
+* **Implementation (`Parquet.Net` Schema):**
+
+    ```csharp
+    private static readonly ParquetSchema LogEntrySchema = new(
+        new DataField<DateTime>("timestamp"),
+        new DataField<string>("level"),
+        new DataField<string>("source"),
+        new DataField<long>("template_hash"),
+        new DataField<string>("message"),
+        new ListField("fields", new StructField("element",
+            new DataField<string>("key"),
+            new StructField("value",
+                new DataField<string?>("string_value"),
+                new DataField<long?>("long_value"),
+                new DataField<double?>("double_value"),
+                new DataField<bool?>("boolean_value")
+            )
+        ))
+    );
+    ```
 
 ### 3.3. Metadata and State (SQLite)
 
@@ -132,8 +158,7 @@ On restart after a crash, the ingester resumes reading from the last committed p
 
 ### 3.4. Schema Management and Conflict Resolution
 
-* **First-Come, First-Served:** The first time a field is seen, its type is permanently recorded in the `FieldSchema` table.
-* **Conflict Handling:** If a future log line provides a non-conforming value for a registered field, it is logged as a warning and written to the special `fields_fallback` map. This preserves data without corrupting the strongly-typed primary columns.
+* **Conflict Handling:** When a value is encountered for a field (e.g., `http_status`) that does not match its registered canonical type (e.g., `long`), the value is simply written into the `string_value` sub-field of the struct for that key. This preserves the data without corrupting the typed columns and keeps it within the same logical structure.
 
 ---
 
@@ -163,12 +188,29 @@ The query tool provides a simple, powerful interface to the log data.
 
 LogTapestry uses **DuckDB** for its exceptional speed in querying Parquet files, its native understanding of Hive partitioning, and its in-process, serverless nature.
 
-### 5.2. The Smart Query Layer
+### **5.2. The Smart Query Layer - **CRITICAL REVISION**
 
-The tool hides the physical storage complexity from the user.
+* **Query Rewriting:** The `QueryRewriter` will now translate a user's logical query on a dynamic field into a physical query that uses the `UNNEST` function to flatten the `fields` list for filtering.
+* **Example:**
+  * **User's Logical Query:**
+        `SELECT message WHERE user_id > 100 AND level = 'ERROR'`
+  * **Rewritten Physical Query (DuckDB SQL):**
 
-* **Query Rewriting:** It uses the `FieldSchema` table in SQLite to rewrite a user's logical query (e.g., `... WHERE user_id = 12345`) into a physical query that targets the correct typed map column (e.g., `... WHERE fields_long['user_id'] = 12345`).
-* **Fallback Handling:** The rewriter can also intelligently target the `fields_fallback` map for queries with values that don't match the canonical type.
+        ```sql
+        SELECT
+            t.message
+        FROM
+            read_parquet('path/to/data/**/*.parquet', hive_partitioning = true) AS t
+        WHERE
+            t.level = 'ERROR'
+            AND EXISTS (
+                SELECT 1
+                FROM UNNEST(t.fields) AS f
+                WHERE f.key = 'user_id' AND f.value.long_value > 100
+            );
+        ```
+
+    *(Note: Using `EXISTS` with a subquery is often more performant for filtering than a full cross-join `UNNEST` in the `FROM` clause.)* The query rewriter will be responsible for generating this optimized physical SQL.
 
 ---
 
@@ -263,4 +305,8 @@ public interface ILogParser
     /// </summary>
     ParsingResult? Flush();
 }
+
+// --- New Helper Records for Parquet Writing ---
+public record FieldElement(string Key, FieldValue Value);
+public record FieldValue(string? string_value, long? long_value, double? double_value, bool? boolean_value);
 ```

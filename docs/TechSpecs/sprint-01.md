@@ -30,21 +30,21 @@ The solution will be created in a Git repository with the following structure:
 
 **Project Details:**
 
-*   **`LogTapestry.Core`** (Class Library, .NET 9)
-    *   **Description:** Contains all shared logic, interfaces, and domain models. Will have no dependencies on the executables.
-    *   **Key NuGet Packages:** `Microsoft.Extensions.Logging.Abstractions`
+* **`LogTapestry.Core`** (Class Library, .NET 9)
+  * **Description:** Contains all shared logic, interfaces, and domain models. Will have no dependencies on the executables.
+  * **Key NuGet Packages:** `Microsoft.Extensions.Logging.Abstractions`
 
-*   **`LogTapestry.Ingester`** (Console Application, .NET 9, Self-Contained)
-    *   **Description:** The main ingester service executable.
-    *   **Key NuGet Packages:** `Microsoft.Extensions.Hosting`, `Serilog.Extensions.Hosting`, `Parquet.Net`, `System.Threading.Channels`, `Microsoft.Data.Sqlite`
+* **`LogTapestry.Ingester`** (Console Application, .NET 9, Self-Contained)
+  * **Description:** The main ingester service executable.
+  * **Key NuGet Packages:** `Microsoft.Extensions.Hosting`, `Serilog.Extensions.Hosting`, `Parquet.Net`, `System.Threading.Channels`, `Microsoft.Data.Sqlite`
 
-*   **`LogTapestry.Query`** (Console Application, .NET 9, Self-Contained)
-    *   **Description:** The standalone query tool.
-    *   **Key NuGet Packages:** `DuckDB.NET`, `Microsoft.Data.Sqlite`, `Spectre.Console` (for table formatting)
+* **`LogTapestry.Query`** (Console Application, .NET 9, Self-Contained)
+  * **Description:** The standalone query tool.
+  * **Key NuGet Packages:** `DuckDB.NET`, `Microsoft.Data.Sqlite`, `Spectre.Console` (for table formatting)
 
-*   **`LogTapestry.Core.Tests`** (Test Project, MSTest or xUnit)
-    *   **Description:** Unit tests for business logic in `LogTapestry.Core`, especially the `RegexLogParser`.
-    *   **Key NuGet Packages:** `Moq`
+* **`LogTapestry.Core.Tests`** (Test Project, MSTest or xUnit)
+  * **Description:** Unit tests for business logic in `LogTapestry.Core`, especially the `RegexLogParser`.
+  * **Key NuGet Packages:** `Moq`
 
 ### **3. Core Domain Model**
 
@@ -101,35 +101,43 @@ public interface ILogParser
 
 **`RegexLogParser` Class:**
 
-*   **Implements:** `ILogParser`
-*   **Constructor:** `public RegexLogParser(PluginConfig config, string sourceFile)`
-*   **Key Internal State:**
-    *   `private readonly StringBuilder _multiLineBuffer;`
-    *   `private LogEntry? _inProgressEntry;`
-    *   `private readonly Regex _startOfEntryRegex;`
-    *   (and other configured regexes)
-*   **Logic:** Will implement the stateful, line-by-line processing logic as defined in the architectural document.
+* **Implements:** `ILogParser`
+* **Constructor:** `public RegexLogParser(PluginConfig config, string sourceFile)`
+* **Key Internal State:**
+  * `private readonly StringBuilder _multiLineBuffer;`
+  * `private LogEntry? _inProgressEntry;`
+  * `private readonly Regex _startOfEntryRegex;`
+  * (and other configured regexes)
+* **Logic:** Will implement the stateful, line-by-line processing logic as defined in the architectural document.
 
 #### **4.2. `LogTapestry.Ingester.exe`**
 
 **`DataSink` Class:**
 
-*   **Responsibility:** Writes a batch of `LogEntry` records to a Parquet file.
-*   **Key Method:** `public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream)`
-*   **Implementation Details:**
-    1.  Will define a `static readonly ParquetSchema` for the log entry structure, including all typed maps.
-    2.  The `WriteBatchAsync` method will perform the "shredding" logic: converting the `LogEntry[]` into parallel `DataColumn` arrays.
-    3.  Will use `Parquet.Net.ParquetWriter` to write the columns to the provided stream.
+* **`DataSink` Class:**
+  * **Responsibility:** Writes a batch of `LogEntry` records to a Parquet file using the **new nested schema**.
+  * **Implementation Details:**
+        1. Will define a `static readonly ParquetSchema` using `ListField` and `StructField` to match the revised design.
+        2. Will define the helper records `FieldElement` and `FieldValue`.
+        3. The `WriteBatchAsync` method will perform the new "shredding" logic: for each `LogEntry`, it will iterate the `Fields` dictionary and create a `List<FieldElement>`, which is then added to the main column array.
+
+* **`LogTapestry.Query.exe` (PoC Version):**
+  * **Core Logic (Revised):** The hardcoded query logic must now perform the **`UNNEST`-based query rewriting**.
+  * **Example:** It will take a logical query like `SELECT * FROM logs WHERE user_id > 100` and transform it into the physical DuckDB SQL:
+
+        ```sql
+        SELECT t.* FROM read_parquet('...') AS t WHERE EXISTS (SELECT 1 FROM UNNEST(t.fields) AS f WHERE f.key = 'user_id' AND f.value.long_value > 100);
+        ```
 
 **For Sprint 1 (PoC), the following components will be simplified:**
 
-*   **`Program.cs`:** Will act as the orchestrator.
-    1.  It will read a hardcoded configuration (no JSON file yet).
-    2.  It will **not** use `DirectoryMonitor`. Instead, it will directly create a "Tailing Task" for a single hardcoded log file path.
-    3.  It will create a bounded `Channel<ParsingResult>`.
-    4.  It will create a consumer task that reads from the channel, batches entries, and uses the `DataSink` to write to a single Parquet file.
-    5.  It will use a simple in-memory `Dictionary<string, string>` as the Schema Registry.
-    6.  It will not use a SQLite DB for state; the tailer will track its position in a simple `long` variable.
+* **`Program.cs`:** Will act as the orchestrator.
+    1. It will read a hardcoded configuration (no JSON file yet).
+    2. It will **not** use `DirectoryMonitor`. Instead, it will directly create a "Tailing Task" for a single hardcoded log file path.
+    3. It will create a bounded `Channel<ParsingResult>`.
+    4. It will create a consumer task that reads from the channel, batches entries, and uses the `DataSink` to write to a single Parquet file.
+    5. It will use a simple in-memory `Dictionary<string, string>` as the Schema Registry.
+    6. It will not use a SQLite DB for state; the tailer will track its position in a simple `long` variable.
 
 ### **5. Configuration Model**
 
@@ -208,27 +216,28 @@ CREATE TABLE ParquetFiles (
 
 For the PoC, the executables will be run with minimal arguments. The full CLI is specified for future sprints.
 
-*   **Ingester:**
-    *   **Usage:** `LogTapestry.Ingester.exe --config <path_to_config.json>`
-    *   **Sprint 1:** Will be run with no arguments and will use hardcoded values.
+* **Ingester:**
+  * **Usage:** `LogTapestry.Ingester.exe --config <path_to_config.json>`
+  * **Sprint 1:** Will be run with no arguments and will use hardcoded values.
 
-*   **Query Tool:**
-    *   **Usage:** `LogTapestry.Query.exe --db <path_to_state.sqlite> --data <path_to_data_dir> "SQL_QUERY"`
-    *   **Sprint 1:** `LogTapestry.Query.exe --data <path> "SELECT ..."`. The `--db` argument will be ignored as the schema will be in-memory.
+* **Query Tool:**
+  * **Usage:** `LogTapestry.Query.exe --db <path_to_state.sqlite> --data <path_to_data_dir> "SQL_QUERY"`
+  * **Sprint 1:** `LogTapestry.Query.exe --data <path> "SELECT ..."`. The `--db` argument will be ignored as the schema will be in-memory.
 
 ### **8. Definition of Done for Sprint 1**
 
 The sprint will be considered complete when the following criteria are met:
 
-1.  The solution and project structure are created and pushed to a Git repository.
-2.  A sample `test.log` file is created with single-line and multi-line entries, containing fields that can be parsed into `string` and `long` types.
-3.  The `LogTapestry.Ingester.exe` can be run. It will:
-    *   Tail the hardcoded `test.log` file from beginning to end.
-    *   Use the `RegexLogParser` to parse the entries.
-    *   Produce a single `output.parquet` file in a `data/` directory.
-4.  The `output.parquet` file can be inspected and is verified to have the correct multi-map schema.
-5.  The `LogTapestry.Query.exe` can be run with a hardcoded query (e.g., `SELECT * FROM logs WHERE user_id > 100`).
-    *   It must correctly rewrite the query to `... WHERE fields_long['user_id'] > 100`.
-    *   It must execute the query using DuckDB against `output.parquet`.
-    *   It must print the correct, filtered results to the console.
-6.  Core parsing logic in `RegexLogParser` has basic unit test coverage.
+1. The solution and project structure are created and pushed to a Git repository.
+2. A sample `test.log` file is created with single-line and multi-line entries, containing fields that can be parsed into `string` and `long` types.
+3. The `LogTapestry.Ingester.exe` can be run. It will:
+    * Tail the hardcoded `test.log` file from beginning to end.
+    * Use the `RegexLogParser` to parse the entries.
+    * Produce a single `output.parquet` file in a `data/` directory.
+4. The `output.parquet` file, when inspected, **is verified to have the correct nested `fields` column schema** (List of Structs).
+5. The `LogTapestry.Query.exe` can be run with a hardcoded query (e.g., `SELECT * FROM logs WHERE user_id > 100`).
+    * It must correctly rewrite the query to use the **`UNNEST` pattern**.
+
+    * It must execute the query using DuckDB against `output.parquet`.
+    * It must print the correct, filtered results to the console.
+6. Core parsing logic in `RegexLogParser` has basic unit test coverage.

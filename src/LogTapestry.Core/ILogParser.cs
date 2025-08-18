@@ -1,11 +1,8 @@
-
-using System.Collections.Generic;
-
 namespace LogTapestry.Core
 {
-    public interface ILogParser
-    {
-        IEnumerable<ParsingResult> Parse(string[] lines);
-        ParsingResult? Flush();
-    }
+  public interface ILogParser
+  {
+    IEnumerable<ParsingResult> Parse(string[] lines);
+    ParsingResult? Flush();
+  }
 }

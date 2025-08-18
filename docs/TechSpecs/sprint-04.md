@@ -63,9 +63,7 @@ This sprint involves a major refactoring of the Sprint 1 PoC into a polished too
   * **Logic:**
         1. **Parse SQL:** Uses a simple regex or a lightweight parser to find all identifiers (potential field names) in the `SELECT`, `WHERE`, and `ORDER BY` clauses of the `userQuery`.
         2. **Schema Lookup:** For each identifier, it calls `_stateProvider.GetFieldTypeAsync(identifier)`.
-        3. **Rewrite:** It builds a new query string, replacing each logical field name with its physical equivalent.
-            * `user_id` -> `fields_long['user_id']`
-            * `session_id` -> `fields_string['session_id']`
+        3. **Rewrite:** It reconstructs the query. For any clause involving a dynamic field, it will generate the appropriate `EXISTS (SELECT 1 FROM UNNEST(t.fields) ...)` subquery, targeting the correct sub-field (`.value.long_value`, `.value.string_value`, etc.) based on the schema lookup.
         4. **FROM Clause Injection:** It replaces the logical table name (e.g., `FROM logs`) with the physical DuckDB path: `FROM read_parquet('{data_path}/**/*.parquet', hive_partitioning = true)`.
         5. **Return:** Returns the fully rewritten, physical SQL string.
 * **Class: `OutputFormatter` (and subclasses)**
