@@ -1,5 +1,6 @@
 // LogTapestry.Ingester/TailingManager.cs
 using LogTapestry.Core;
+using Microsoft.Extensions.Logging;
 
 using System.Collections.Concurrent;
 using System.Threading.Channels;
@@ -8,17 +9,20 @@ namespace LogTapestry.Ingester
 {
   public class TailingManager
   {
+    private readonly ILogger _logger;
     private readonly IStateProvider _stateProvider;
     private readonly ConcurrentDictionary<ulong, CancellationTokenSource> _activeTailers = new();
     private readonly PluginSettings _pluginSettings;
 
-    public TailingManager(IStateProvider stateProvider, PluginSettings pluginSettings)
+    public TailingManager(IStateProvider stateProvider, PluginSettings pluginSettings, ILoggerFactory loggerFactory)
     {
       _stateProvider = stateProvider;
       _pluginSettings = pluginSettings;
+      _logger = loggerFactory.CreateLogger("TailingManager");
     }
 
-    public async Task RunAsync(ChannelReader<FileWorkItem> workChannel, ChannelWriter<ParsingResult> outputChannel, CancellationToken token)
+    public async Task RunAsync(ChannelReader<FileWorkItem> workChannel, 
+      ChannelWriter<ParsingResult> outputChannel, CancellationToken token)
     {
       await foreach (var workItem in workChannel.ReadAllAsync(token)) {
         switch (workItem.Type) {
@@ -27,13 +31,13 @@ namespace LogTapestry.Ingester
             if (!_activeTailers.ContainsKey(workItem.FileId)) {
               var tailerCts = CancellationTokenSource.CreateLinkedTokenSource(token);
               _activeTailers[workItem.FileId] = tailerCts;
-              Console.WriteLine($"[TailingManager] Starting tailer for: {workItem.FilePath} (ID: {workItem.FileId})");
+              _logger.LogDebug("Starting tailer for: {FilePath} (ID: {FileId})", workItem.FilePath, workItem.FileId);
               _ = Task.Run(() => TailingTask(workItem, outputChannel, tailerCts.Token), token);
             }
             break;
           case FileWorkType.FileRemovedOrRotated:
             if (_activeTailers.TryRemove(workItem.FileId, out var cts)) {
-              Console.WriteLine($"[TailingManager] Stopping tailer for: {workItem.FilePath} (ID: {workItem.FileId})");
+              _logger.LogDebug("Stopping tailer for: {FilePath} (ID: {FileId})", workItem.FilePath, workItem.FileId);
               cts.Cancel();
             }
             break;

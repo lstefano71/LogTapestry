@@ -12,30 +12,29 @@ namespace LogTapestry.Ingester
   {
     private readonly ILogger<IngesterService> _logger;
     private readonly LogTapestrySettings _settings;
-    private DirectoryMonitor? _directoryMonitor;
-    private TailingManager? _tailingManager;
+    private readonly DirectoryMonitor _directoryMonitor;
+    private readonly TailingManager _tailingManager;
     private Task? _monitorTask;
     private Task? _tailingTask;
     private Channel<FileWorkItem>? _workChannel;
     private Channel<ParsingResult>? _outputChannel;
     private CancellationTokenSource? _cts;
 
-    public IngesterService(ILogger<IngesterService> logger, Microsoft.Extensions.Options.IOptions<LogTapestrySettings> options)
+    public IngesterService(
+      ILogger<IngesterService> logger,
+      Microsoft.Extensions.Options.IOptions<LogTapestrySettings> options,
+      DirectoryMonitor directoryMonitor,
+      TailingManager tailingManager)
     {
       _logger = logger;
       _settings = options.Value;
+      _directoryMonitor = directoryMonitor;
+      _tailingManager = tailingManager;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
       _logger.LogInformation("IngesterService starting.");
-
-      // Use DI-injected settings
-      var stateProvider = new SqliteStateProvider("state.db");
-      var ingesterSettings = _settings.Ingester;
-      var pluginSettings = _settings.Plugins.Count > 0 ? _settings.Plugins[0] : new LogTapestry.Core.PluginSettings();
-      _directoryMonitor = new DirectoryMonitor(ingesterSettings, stateProvider);
-      _tailingManager = new TailingManager(stateProvider, pluginSettings);
 
       _workChannel = Channel.CreateUnbounded<FileWorkItem>();
       _outputChannel = Channel.CreateUnbounded<ParsingResult>();

@@ -1,5 +1,7 @@
 // LogTapestry.Ingester/DirectoryMonitor.cs
 using LogTapestry.Core;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 using System.Threading.Channels;
 
@@ -23,14 +25,18 @@ namespace LogTapestry.Ingester
 
   public class DirectoryMonitor
   {
+    private readonly ILogger _logger;
     private readonly IngesterSettings _settings;
     private readonly IStateProvider _stateProvider;
     private readonly Channel<FileWorkItem> _channel;
 
-    public DirectoryMonitor(IngesterSettings settings, IStateProvider stateProvider)
+    public DirectoryMonitor(IOptions<IngesterSettings> options,
+      IStateProvider stateProvider,
+      ILoggerFactory loggerFactory)
     {
-      _settings = settings;
+      _settings = options.Value;
       _stateProvider = stateProvider;
+      _logger = loggerFactory.CreateLogger("DirectoryMonitor");
       _channel = Channel.CreateUnbounded<FileWorkItem>();
     }
 
@@ -121,7 +127,7 @@ namespace LogTapestry.Ingester
         seen.Add(id);
 
         if (!trackedFiles.TryGetValue(id, out TrackedFileInfo? tracked)) {
-          Console.WriteLine($"[DirectoryMonitor] File added: {filePath} (ID: {id})");
+          _logger.LogDebug("File added: {FilePath} (ID: {FileId})", filePath, id);
           await writer.WriteAsync(new FileWorkItem {
             Type = FileWorkType.FileAdded,
             VolumeSerial = fileIdObj.VolumeSerial,
@@ -132,7 +138,7 @@ namespace LogTapestry.Ingester
         } else {
           var diskWriteTime = File.GetLastWriteTimeUtc(filePath).Ticks;
           if (diskWriteTime > tracked.LastWriteTimeUtc.Ticks) {
-            Console.WriteLine($"[DirectoryMonitor] File changed: {filePath} (ID: {id})");
+            _logger.LogDebug("File changed: {FilePath} (ID: {FileId})", filePath, id);
             await writer.WriteAsync(new FileWorkItem {
               Type = FileWorkType.FileChanged,
               VolumeSerial = fileIdObj.VolumeSerial,
@@ -146,7 +152,7 @@ namespace LogTapestry.Ingester
 
       foreach (var kvp in trackedFiles) {
         if (!seen.Contains(kvp.Key)) {
-          Console.WriteLine($"[DirectoryMonitor] File removed or rotated: {kvp.Value.FilePath} (ID: {kvp.Value.FileId})");
+          _logger.LogDebug("File removed or rotated: {FilePath} (ID: {FileId})", kvp.Value.FilePath, kvp.Value.FileId);
           await writer.WriteAsync(new FileWorkItem {
             Type = FileWorkType.FileRemovedOrRotated,
             VolumeSerial = kvp.Value.VolumeSerial,

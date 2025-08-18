@@ -14,6 +14,7 @@ public class IngesterSettings
   public int MaxParsingParallelism { get; set; } = Environment.ProcessorCount;
   public string DataRoot { get; set; } = "data";
   public string DatabasePath { get; set; } = "data/state.sqlite";
+  public string LogLevel { get; set; } = "Information"; // Added log level config
 }
 
 public class PluginSettings

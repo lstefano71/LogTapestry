@@ -17,11 +17,11 @@ namespace LogTapestry.Ingester
     private readonly IStateProvider _stateProvider;
     private readonly IngesterSettings _settings;
 
-    public MonitoringService(ILogger<MonitoringService> logger, IStateProvider stateProvider, IngesterSettings settings)
+    public MonitoringService(ILogger<MonitoringService> logger, IStateProvider stateProvider, Microsoft.Extensions.Options.IOptions<IngesterSettings> options)
     {
       _logger = logger;
       _stateProvider = stateProvider;
-      _settings = settings;
+      _settings = options.Value;
     }
 
     private WebApplication? _webApp;

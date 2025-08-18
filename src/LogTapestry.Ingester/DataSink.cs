@@ -1,5 +1,6 @@
 using LogTapestry.Core;
-
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Parquet;
 using Parquet.Data;
 using Parquet.Schema;
@@ -36,8 +37,17 @@ public class DataSink
       )
   );
 
+  private readonly ILogger<DataSink> _logger;
+  public DataSink(ILogger<DataSink> logger)
+  {
+    _logger = logger;
+  }
+
   public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream)
   {
+    if (batch.Length > 0)
+      _logger.LogDebug($"Writing batch of {batch.Length} log entries. First entry: {batch[0]}");
+
     using var parquetWriter = await ParquetWriter.CreateAsync(Schema, targetStream);
     using var groupWriter = parquetWriter.CreateRowGroup();
 
