@@ -92,7 +92,7 @@ namespace LogTapestry.Ingester
         Console.WriteLine(new string('-', 40));
       }
       var dataSink = new DataSink();
-      using var stream = new FileStream("data/output.parquet", FileMode.Append);
+      using var stream = new FileStream("data/output.parquet", FileMode.Create);
       await dataSink.WriteBatchAsync([.. batch], stream);
     }
   }

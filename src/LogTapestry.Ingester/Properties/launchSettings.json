@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "LogTapestry.Ingester": {
+      "commandName": "Project",
+      "workingDirectory": "$(SolutionDir)"
+    }
+  }
+}
