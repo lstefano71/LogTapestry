@@ -106,3 +106,4 @@ StyleCopReport.xml
 .DS_Store
 Thumbs.db
 /data
+/state.sqlite

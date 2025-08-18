@@ -11,44 +11,53 @@ namespace LogTapestry.Ingester
       var settings = new LogTapestrySettings {
         Ingester = new IngesterSettings {
           Directory = "d:\\devel\\LogTapestry\\sample-logs",
-          IncludePatterns = ["*.log"]
+          IncludePatterns = new List<string> { "*.log" }
         },
-        Plugins =
-          [
-            new PluginSettings {
-              Type = "regex",
-              Name = "default",
-              IncludePatterns = ["*.log"],
-              Config = new RegexPluginConfig
-              {
-                  StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
-                  TimestampRegex = @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)",
-                  TimestampIsUtc = true,
-                  LevelRegex = @"\b(INFO|WARN|ERROR)\b",
-                  FieldsRegexes =
-                  [
-                      new FieldRegex { Regex = @"user_id=(\d+)", FieldName = "user_id", Type = "long" },
-                      new FieldRegex { Regex = @"order_id=(\d+)", FieldName = "order_id", Type = "long" },
-                      new FieldRegex { Regex = @"free_space=(\d+)", FieldName = "free_space", Type = "long" },
-                      new FieldRegex { Regex = @"username=""([^""]+)""", FieldName = "username" },
-                      new FieldRegex { Regex = @"reason=""([^""]+)""", FieldName = "reason" },
-                      new FieldRegex { Regex = @"details=""([^""]+)""", FieldName = "details" }
-
-                  ]
-              }
-           }
-         ]
+        Plugins = new List<PluginSettings>
+          {
+            new PluginSettings
+            {
+                Type = "regex",
+                Name = "default",
+                IncludePatterns = new List<string> { "*.log" },
+                Config = new RegexPluginConfig
+                {
+                    StartOfEntryRegex = @"^\d{4}-\d{2}-\d{2}",
+                    TimestampRegex = @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)",
+                    TimestampIsUtc = true,
+                    LevelRegex = @"\b(INFO|WARN|ERROR)\b",
+                    FieldsRegexes = new List<FieldRegex>
+                    {
+                        new FieldRegex { Regex = @"user_id=(\d+)", FieldName = "user_id", Type = "long" },
+                        new FieldRegex { Regex = @"order_id=(\d+)", FieldName = "order_id", Type = "long" },
+                        new FieldRegex { Regex = @"free_space=(\d+)", FieldName = "free_space", Type = "long" },
+                        new FieldRegex { Regex = @"username=""([^""]+)""", FieldName = "username" },
+                        new FieldRegex { Regex = @"reason=""([^""]+)""", FieldName = "reason" },
+                        new FieldRegex { Regex = @"details=""([^""]+)""", FieldName = "details" }
+                    }
+                }
+            }
+        }
       };
 
-      var channel = Channel.CreateBounded<ParsingResult>(settings.Ingester.PipelineBufferCapacity);
+      var stateProvider = new SqliteStateProvider("state.sqlite");
+      var fileWorkChannel = Channel.CreateUnbounded<FileWorkItem>();
+      var parsingResultChannel = Channel.CreateUnbounded<ParsingResult>();
+
+      var directoryMonitor = new DirectoryMonitor(settings.Ingester, stateProvider);
+      var tailingManager = new TailingManager(stateProvider);
+
+      var cts = new CancellationTokenSource();
+
+      var monitorTask = directoryMonitor.RunAsync(fileWorkChannel.Writer, cts.Token);
+      var tailingTask = tailingManager.RunAsync(fileWorkChannel.Reader, parsingResultChannel.Writer, cts.Token);
 
       var consumer = Task.Run(async () => {
         var batch = new List<LogEntry>();
-        await foreach (var result in channel.Reader.ReadAllAsync()) {
+        await foreach (var result in parsingResultChannel.Reader.ReadAllAsync(cts.Token)) {
           if (result.IsSuccess && result.Entry != null) {
             batch.Add(result.Entry);
-            if (batch.Count >= 100) // Arbitrary batch size
-            {
+            if (batch.Count >= 100) {
               await WriteBatch(batch);
               batch.Clear();
             }
@@ -61,22 +70,7 @@ namespace LogTapestry.Ingester
         }
       });
 
-      var logFilePath = Path.Combine(settings.Ingester.Directory, "test.log");
-      var plugin = settings.Plugins[0];
-      var parser = new RegexLogParser(plugin, logFilePath);
-
-      var lines = await File.ReadAllLinesAsync(logFilePath);
-      foreach (var result in parser.Parse(lines)) {
-        await channel.Writer.WriteAsync(result);
-      }
-
-      var finalResult = parser.Flush();
-      if (finalResult != null) {
-        await channel.Writer.WriteAsync(finalResult);
-      }
-
-      channel.Writer.Complete();
-      await consumer;
+      await Task.WhenAll(monitorTask, tailingTask, consumer);
     }
 
     private static async Task WriteBatch(List<LogEntry> batch)
