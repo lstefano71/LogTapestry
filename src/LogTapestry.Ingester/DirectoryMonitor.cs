@@ -139,6 +139,10 @@ namespace LogTapestry.Ingester
           for (int i = 0; i < _retryQueue.Count; i++) {
             if (_retryQueue.TryDequeue(out var retryPath)) {
               if (!IsMatch(retryPath)) continue;
+              if (!File.Exists(retryPath)) {
+                // File was deleted, do not re-enqueue
+                continue;
+              }
               var fileIdObj = NtfsUtils.GetFileIdentifier(retryPath);
               if (fileIdObj == null) {
                 // Still locked, re-enqueue for next round
