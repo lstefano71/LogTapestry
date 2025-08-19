@@ -46,7 +46,8 @@ public class Program
     builder.Services.AddSerilog((_, logConfig) => {
       logConfig
           .MinimumLevel.Is(logLevel)
-          .WriteTo.Console(restrictedToMinimumLevel: logLevel)
+          .Enrich.With(new UtcTimestampEnricher())
+          .WriteTo.Console(restrictedToMinimumLevel: logLevel, outputTemplate: "{UtcTimestamp} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
           .WriteTo.File("logs/ingester-.log", rollingInterval: Serilog.RollingInterval.Day)
           .WriteTo.File("logs/ingester-errors-.json", rollingInterval: Serilog.RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning, formatProvider: null);
     });
