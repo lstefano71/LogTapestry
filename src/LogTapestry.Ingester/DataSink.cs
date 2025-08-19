@@ -22,20 +22,21 @@ public class DataSink
   public record FieldElement(string Key, FieldValue Value);
 
   private static readonly ParquetSchema Schema = new(
-      new DataField<DateTime>("Timestamp"),
-      new DataField<string>("Level"),
-      new DataField<string>("Message"),
-      new DataField<string>("Source"),
-      new DataField<long>("TemplateHash"),
-      new ListField("Fields",
-          new StructField("FieldElement",
-              new DataField<string>("Key"),
-              new DataField<string>("StringValue", true),
-              new DataField<long?>("LongValue", true),
-              new DataField<double?>("DoubleValue", true),
-              new DataField<bool?>("BoolValue", true)
-          )
+    new DataField<DateTime>("Timestamp"),
+    new DataField<string>("Level"),
+    new DataField<string>("Message"),
+    new DataField<string>("Source"),
+    new DataField<long>("TemplateHash"),
+  new DataField<byte[]>("Ulid"), // 16-byte ULID
+    new ListField("Fields",
+      new StructField("FieldElement",
+        new DataField<string>("Key"),
+        new DataField<string>("StringValue", true),
+        new DataField<long?>("LongValue", true),
+        new DataField<double?>("DoubleValue", true),
+        new DataField<bool?>("BoolValue", true)
       )
+    )
   );
 
   private readonly ILogger<DataSink> _logger;
@@ -52,7 +53,7 @@ public class DataSink
   public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream, string? parquetFilePath = null)
   {
     if (batch.Length > 0)
-      _logger.LogDebug("Writing batch of {length} log entries. First entry: {entry}", 
+      _logger.LogDebug("Writing batch of {length} log entries. First entry: {entry}",
         batch.Length, batch[0]);
 
     using var parquetWriter = await ParquetWriter.CreateAsync(Schema, targetStream);
@@ -64,8 +65,9 @@ public class DataSink
     await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[2], batch.Select(e => e.Message).ToArray()));
     await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[3], batch.Select(e => e.Source).ToArray()));
     await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[4], batch.Select(e => e.TemplateHash).ToArray()));
+    await groupWriter.WriteColumnAsync(new DataColumn(Schema.DataFields[5], batch.Select(e => e.Ulid).ToArray()));
 
-    var listField = (ListField)Schema.Fields[5];
+    var listField = (ListField)Schema.Fields[6];
     var shredder = new NestedListShredder(listField);
     shredder.Shred(batch);
 

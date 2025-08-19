@@ -152,6 +152,7 @@ namespace LogTapestry.Compactor
       if (type == typeof(float)) return new DataField<float>(name);
       if (type == typeof(bool)) return new DataField<bool>(name);
       if (type == typeof(DateTime)) return new DataField<DateTime>(name);
+      if (type == typeof(byte[]) || name.ToLower() == "ulid") return new DataField<byte[]>(name);
       // Fallback to string for unknown types
       return new DataField<string>(name);
     }

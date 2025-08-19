@@ -55,7 +55,7 @@ namespace LogTapestry.Ingester
         try {
           // The idiomatic and race-free way to use a PeriodicTimer.
           // This loop will execute approximately every 5 seconds.
-          while (await timer.WaitForNextTickAsync(_cts.Token)) { 
+          while (await timer.WaitForNextTickAsync(_cts.Token)) {
             try {
               // After each tick, drain whatever is currently in the channel.
               // This is a non-blocking loop. If the channel is empty, it does nothing.
@@ -88,7 +88,7 @@ namespace LogTapestry.Ingester
         } catch (OperationCanceledException) {
           // This is the expected way to exit the loop when shutdown is requested.
           _logger.LogInformation("Consumer pipeline cancellation requested.");
-        } 
+        }
 
         _logger.LogInformation("Consumer pipeline has shut down.");
 

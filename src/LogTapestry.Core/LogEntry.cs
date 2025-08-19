@@ -10,6 +10,7 @@ namespace LogTapestry.Core
       string Message,
       string Source, // The file path
       long TemplateHash,
-      IReadOnlyDictionary<string, object> Fields // Values are already typed
+      IReadOnlyDictionary<string, object> Fields, // Values are already typed
+      byte[] Ulid // 16 bytes, binary ULID
   );
 }

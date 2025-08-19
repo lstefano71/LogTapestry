@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 
+
 namespace LogTapestry.Core
 {
   public class RegexLogParser : ILogParser
@@ -68,7 +69,9 @@ namespace LogTapestry.Core
         }
       }
 
-      return new LogEntry(timestamp, level, message, _sourceFile, 0, fields);
+      // Generate ULID
+      var ulid = Ulid.NewUlid().ToByteArray();
+      return new LogEntry(timestamp, level, message, _sourceFile, 0, fields, ulid);
     }
 
     private ParsingResult FinalizeEntry()
@@ -108,7 +111,8 @@ namespace LogTapestry.Core
             level = match.Groups[1].Value;
           }
         }
-        var entry = _inProgressEntry with { Message = finalMessage, Fields = fields, Level = level };
+        // Preserve ULID from _inProgressEntry
+        var entry = _inProgressEntry with { Message = finalMessage, Fields = fields, Level = level, Ulid = _inProgressEntry.Ulid };
         _inProgressEntry = null;
         _multiLineBuffer.Clear();
         return ParsingResult.Success(entry);
