@@ -41,16 +41,59 @@ public class DataSink
 
   private readonly ILogger<DataSink> _logger;
   private readonly IStateProvider? _stateProvider;
-  private readonly string? _partitionPath;
 
-  public DataSink(ILogger<DataSink> logger, IStateProvider? stateProvider = null, string? partitionPath = null)
+  public DataSink(ILogger<DataSink> logger, IStateProvider? stateProvider = null)
   {
     _logger = logger;
     _stateProvider = stateProvider;
-    _partitionPath = partitionPath;
   }
 
-  public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream, string? parquetFilePath = null)
+  private async Task PopulateFieldSchemaAsync(LogEntry[] batch)
+  {
+    if (_stateProvider is SqliteStateProvider sqliteProvider) {
+      var conn = sqliteProvider.GetConnection();
+      var allFields = batch.SelectMany(e => e.Fields).GroupBy(f => f.Key).Select(g => g.First());
+      foreach (var field in allFields) {
+        var fieldName = field.Key;
+        var value = field.Value;
+        string fieldType = value switch {
+          long => "long",
+          double => "double",
+          bool => "bool",
+          _ => "string"
+        };
+        var cmdCheck = conn.CreateCommand();
+        cmdCheck.CommandText = "SELECT COUNT(*) FROM FieldSchema WHERE FieldName = @fieldName";
+        cmdCheck.Parameters.AddWithValue("@fieldName", fieldName);
+        var exists = (long)await cmdCheck.ExecuteScalarAsync() > 0;
+        if (!exists) {
+          var cmdInsert = conn.CreateCommand();
+          cmdInsert.CommandText = "INSERT INTO FieldSchema (FieldName, FieldType) VALUES (@fieldName, @fieldType)";
+          cmdInsert.Parameters.AddWithValue("@fieldName", fieldName);
+          cmdInsert.Parameters.AddWithValue("@fieldType", fieldType);
+          await cmdInsert.ExecuteNonQueryAsync();
+        }
+      }
+    }
+  }
+
+  private async Task IndexParquetFileAsync(LogEntry[] batch, Stream targetStream, string? parquetFilePath, string? partitionPath)
+  {
+    if (_stateProvider != null && parquetFilePath != null && partitionPath != null && targetStream.CanSeek) {
+      var cmd = ((SqliteStateProvider)_stateProvider).GetConnection().CreateCommand();
+      cmd.CommandText = @"INSERT INTO ParquetFiles (FilePath, Partition, RowCount, SizeBytes, CreatedUtc) VALUES (@filePath, @partition, @rowCount, @sizeBytes, @createdUtc);";
+      cmd.Parameters.AddWithValue("@filePath", parquetFilePath);
+      cmd.Parameters.AddWithValue("@partition", partitionPath);
+      cmd.Parameters.AddWithValue("@rowCount", batch.Length);
+      cmd.Parameters.AddWithValue("@sizeBytes", targetStream.Length);
+      cmd.Parameters.AddWithValue("@createdUtc", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+      await cmd.ExecuteNonQueryAsync();
+    }
+  }
+
+  public async Task WriteBatchAsync(LogEntry[] batch,
+    Stream targetStream,
+    string? parquetFilePath = null, string? partitionPath = null)
   {
     if (batch.Length > 0)
       _logger.LogDebug("Writing batch of {length} log entries. First entry: {entry}",
@@ -81,17 +124,11 @@ public class DataSink
       Metrics.BytesProcessed += targetStream.Length;
     }
 
-    // Index Parquet file in SQLite
-    if (_stateProvider != null && parquetFilePath != null && _partitionPath != null && targetStream.CanSeek) {
-      var cmd = ((SqliteStateProvider)_stateProvider).GetConnection().CreateCommand();
-      cmd.CommandText = @"INSERT INTO ParquetFiles (FilePath, Partition, RowCount, SizeBytes, CreatedUtc) VALUES (@filePath, @partition, @rowCount, @sizeBytes, @createdUtc);";
-      cmd.Parameters.AddWithValue("@filePath", parquetFilePath);
-      cmd.Parameters.AddWithValue("@partition", _partitionPath);
-      cmd.Parameters.AddWithValue("@rowCount", batch.Length);
-      cmd.Parameters.AddWithValue("@sizeBytes", targetStream.Length);
-      cmd.Parameters.AddWithValue("@createdUtc", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-      await cmd.ExecuteNonQueryAsync();
-    }
+    // --- FieldSchema population logic ---
+    await PopulateFieldSchemaAsync(batch);
+
+    // --- Parquet file indexing logic ---
+    await IndexParquetFileAsync(batch, targetStream, parquetFilePath, partitionPath);
   }
 
   private class NestedListShredder

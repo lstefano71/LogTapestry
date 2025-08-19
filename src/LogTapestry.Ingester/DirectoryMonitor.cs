@@ -6,6 +6,7 @@ using Microsoft.Extensions.FileSystemGlobbing.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
@@ -32,6 +33,7 @@ namespace LogTapestry.Ingester
     private readonly IngesterSettings _settings;
     private readonly IStateProvider _stateProvider;
     private readonly Channel<FileWorkItem> _channel;
+    private readonly ConcurrentQueue<string> _retryQueue = new();
 
     public DirectoryMonitor(IOptions<IngesterSettings> options,
       IStateProvider stateProvider,
@@ -55,7 +57,7 @@ namespace LogTapestry.Ingester
         matcher.AddIncludePatterns(_settings.IncludePatterns);
         matcher.AddExcludePatterns(_settings.ExcludePatterns);
 
-        var watcher = new FileSystemWatcher(_settings.Directory, "*.*") {
+        var watcher = new FileSystemWatcher(_settings.Directory, "*") {
           IncludeSubdirectories = true,
           EnableRaisingEvents = true,
           InternalBufferSize = 64 * 1024
@@ -73,7 +75,10 @@ namespace LogTapestry.Ingester
         {
           if (!IsMatch(e.FullPath)) return;
           var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
-          if (fileIdObj == null) return;
+          if (fileIdObj == null) {
+            _retryQueue.Enqueue(e.FullPath);
+            return;
+          }
           var id = fileIdObj.FileId;
           var diskWriteTime = File.GetLastWriteTimeUtc(e.FullPath).Ticks;
           writer.TryWrite(new FileWorkItem {
@@ -89,7 +94,10 @@ namespace LogTapestry.Ingester
         {
           if (!IsMatch(e.FullPath)) return;
           var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
-          if (fileIdObj == null) return;
+          if (fileIdObj == null) {
+            _retryQueue.Enqueue(e.FullPath);
+            return;
+          }
           var id = fileIdObj.FileId;
           writer.TryWrite(new FileWorkItem {
             Type = FileWorkType.FileAdded,
@@ -127,6 +135,27 @@ namespace LogTapestry.Ingester
 
         // Keep alive until cancellation requested
         while (!token.IsCancellationRequested) {
+          // Retry logic: process files in the retry queue
+          for (int i = 0; i < _retryQueue.Count; i++) {
+            if (_retryQueue.TryDequeue(out var retryPath)) {
+              if (!IsMatch(retryPath)) continue;
+              var fileIdObj = NtfsUtils.GetFileIdentifier(retryPath);
+              if (fileIdObj == null) {
+                // Still locked, re-enqueue for next round
+                _retryQueue.Enqueue(retryPath);
+                continue;
+              }
+              var id = fileIdObj.FileId;
+              var diskWriteTime = File.GetLastWriteTimeUtc(retryPath).Ticks;
+              writer.TryWrite(new FileWorkItem {
+                Type = FileWorkType.FileAdded,
+                VolumeSerial = fileIdObj.VolumeSerial,
+                FileId = id,
+                FilePath = retryPath,
+                LastWriteTimeUtc = diskWriteTime
+              });
+            }
+          }
           await Task.Delay(500, token);
         }
 

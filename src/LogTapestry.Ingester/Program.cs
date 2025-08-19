@@ -76,7 +76,10 @@ public class Program
       sp.GetRequiredService<ILoggerFactory>(),
       sp.GetRequiredService<IOptions<IngesterSettings>>().Value
     ));
-    builder.Services.AddSingleton<DataSink>(sp => new DataSink(sp.GetRequiredService<ILogger<DataSink>>()));
+    builder.Services.AddSingleton<DataSink>(sp => new DataSink(
+      sp.GetRequiredService<ILogger<DataSink>>(),
+      sp.GetRequiredService<IStateProvider>()
+    ));
 
     // Register hosted services
     builder.Services.AddHostedService<IngesterService>();

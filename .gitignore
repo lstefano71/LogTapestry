@@ -108,3 +108,4 @@ Thumbs.db
 /data
 /state.sqlite
 /logs
+/sample-logs/*.txt

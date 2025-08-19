@@ -68,14 +68,14 @@ namespace LogTapestry.Ingester
 
                 // To avoid letting the batch grow too large during a high-volume burst
                 // that lasts longer than the timer's interval, we still check the batch size here.
-                if (batch.Count >= 1000) {
+                if (batch.Count >= _settings.Ingester.BatchSize) {
                   await WriteBatch(batch);
                   batch.Clear();
                 }
               }
 
               // After draining the channel, if there's anything left in the batch, write it.
-              // This handles the case where log volume is low and the batch never reaches 1000.
+              // This handles the case where log volume is low and the batch never reaches the batch size.
               if (batch.Count > 0) {
                 await WriteBatch(batch);
                 batch.Clear();
@@ -116,10 +116,10 @@ namespace LogTapestry.Ingester
           "landing"
         );
         Directory.CreateDirectory(partitionPath);
-        var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet.tmp");
+        var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet_tmp");
         var finalFilePath = Path.ChangeExtension(tempFilePath, ".parquet");
         await using (var stream = File.Create(tempFilePath)) {
-          await _dataSink.WriteBatchAsync([.. ulidBatch], stream);
+          await _dataSink.WriteBatchAsync([.. ulidBatch], stream, finalFilePath, partitionPath);
         }
         File.Move(tempFilePath, finalFilePath);
         _logger.LogInformation(

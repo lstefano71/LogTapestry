@@ -16,6 +16,10 @@ public class IngesterSettings
   public string DataRoot { get; set; } = "data";
   public string DatabasePath { get; set; } = "data/state.sqlite";
   public string LogLevel { get; set; } = "Information"; // Added log level config
+
+  public int BatchSize { get; set; } = 50000;
+  public int PollingIntervalMs { get; set; } = 1000;
+  public string MonitoringUrl { get; set; } = "";
 }
 
 public class PluginSettings
