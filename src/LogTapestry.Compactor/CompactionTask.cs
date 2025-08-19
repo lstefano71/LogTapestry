@@ -133,11 +133,11 @@ namespace LogTapestry.Compactor
     private TimeSpan ParseTimeSpan(string input)
     {
       // Simple parser: "1h", "2d", "30m"
-      if (input.EndsWith("h"))
+      if (input.EndsWith('h'))
         return TimeSpan.FromHours(double.Parse(input.TrimEnd('h')));
-      if (input.EndsWith("d"))
+      if (input.EndsWith('d'))
         return TimeSpan.FromDays(double.Parse(input.TrimEnd('d')));
-      if (input.EndsWith("m"))
+      if (input.EndsWith('m'))
         return TimeSpan.FromMinutes(double.Parse(input.TrimEnd('m')));
       throw new ArgumentException("Invalid timespan format. Use '1h', '2d', or '30m'.");
     }
