@@ -104,10 +104,9 @@ namespace LogTapestry.Compactor
         }
         if (batchRows.Count > 0) {
           var chunkPath = Path.Combine(partitionPath, $"compacted.{fileIndex}.parquet");
-          using (var fs = File.Create(chunkPath)) {
-            var parquetWriter = await ParquetWriter.CreateAsync(parquetSchema, fs);
-            await WriteRowGroupAsync(parquetWriter, parquetSchema, batchRows);
-          }
+          using var fs = File.Create(chunkPath);
+          var parquetWriter = await ParquetWriter.CreateAsync(parquetSchema, fs);
+          await WriteRowGroupAsync(parquetWriter, parquetSchema, batchRows);
         }
 
         // 4. Delete landing/ directory

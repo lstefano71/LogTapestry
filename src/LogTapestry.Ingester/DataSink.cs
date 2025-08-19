@@ -52,7 +52,8 @@ public class DataSink
   public async Task WriteBatchAsync(LogEntry[] batch, Stream targetStream, string? parquetFilePath = null)
   {
     if (batch.Length > 0)
-      _logger.LogDebug($"Writing batch of {batch.Length} log entries. First entry: {batch[0]}");
+      _logger.LogDebug("Writing batch of {length} log entries. First entry: {entry}", 
+        batch.Length, batch[0]);
 
     using var parquetWriter = await ParquetWriter.CreateAsync(Schema, targetStream);
     using var groupWriter = parquetWriter.CreateRowGroup();

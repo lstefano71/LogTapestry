@@ -50,35 +50,48 @@ namespace LogTapestry.Ingester
       // Start consumer pipeline
       _consumerTask = Task.Run(async () => {
         var batch = new List<LogEntry>();
-        var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
-        while (!_cts!.Token.IsCancellationRequested) {
-          try {
-            await Task.WhenAny(
-              _outputChannel!.Reader.WaitToReadAsync(_cts.Token).AsTask(),
-              timer.WaitForNextTickAsync(_cts.Token).AsTask()
-            );
-            while (_outputChannel.Reader.TryRead(out var result)) {
-              if (result.IsSuccess && result.Entry != null) {
-                batch.Add(result.Entry);
-              } else {
-                _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}, Text: {UnparseableText}", result.ErrorMessage, result.Source, result.UnparseableText);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+
+        try {
+          // The idiomatic and race-free way to use a PeriodicTimer.
+          // This loop will execute approximately every 5 seconds.
+          while (await timer.WaitForNextTickAsync(_cts.Token)) { 
+            try {
+              // After each tick, drain whatever is currently in the channel.
+              // This is a non-blocking loop. If the channel is empty, it does nothing.
+              while (_outputChannel.Reader.TryRead(out var result)) {
+                if (result.IsSuccess && result.Entry != null) {
+                  batch.Add(result.Entry);
+                } else {
+                  _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}, Text: {UnparseableText}", result.ErrorMessage, result.Source, result.UnparseableText);
+                }
+
+                // To avoid letting the batch grow too large during a high-volume burst
+                // that lasts longer than the timer's interval, we still check the batch size here.
+                if (batch.Count >= 1000) {
+                  await WriteBatch(batch);
+                  batch.Clear();
+                }
               }
-              if (batch.Count >= 1000) {
+
+              // After draining the channel, if there's anything left in the batch, write it.
+              // This handles the case where log volume is low and the batch never reaches 1000.
+              if (batch.Count > 0) {
                 await WriteBatch(batch);
                 batch.Clear();
               }
+            } catch (Exception ex) {
+              // Catching exceptions inside the loop makes the consumer resilient to transient errors.
+              _logger.LogError(ex, "An error occurred in a single consumer pipeline iteration.");
             }
-            if (batch.Count > 0) {
-              await WriteBatch(batch);
-              batch.Clear();
-            }
-          } catch (OperationCanceledException) {
-            break;
-          } catch (Exception ex) {
-            _logger.LogError(ex, "An error occurred in the consumer pipeline.");
           }
-        }
-        _logger.LogInformation("Consumer pipeline shutting down.");
+        } catch (OperationCanceledException) {
+          // This is the expected way to exit the loop when shutdown is requested.
+          _logger.LogInformation("Consumer pipeline cancellation requested.");
+        } 
+
+        _logger.LogInformation("Consumer pipeline has shut down.");
+
       }, _cts.Token);
 
       return Task.CompletedTask;
@@ -102,7 +115,7 @@ namespace LogTapestry.Ingester
         var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet.tmp");
         var finalFilePath = Path.ChangeExtension(tempFilePath, ".parquet");
         await using (var stream = File.Create(tempFilePath)) {
-          await _dataSink.WriteBatchAsync(batch.ToArray(), stream);
+          await _dataSink.WriteBatchAsync([.. batch], stream);
         }
         File.Move(tempFilePath, finalFilePath);
         _logger.LogInformation(

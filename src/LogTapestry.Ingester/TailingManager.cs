@@ -24,7 +24,7 @@ namespace LogTapestry.Ingester
       _pluginSettingsList = pluginSettingsList;
       _logger = loggerFactory.CreateLogger("TailingManager");
       _settings = settings;
-      _pluginMatchers = new Dictionary<PluginSettings, Matcher>();
+      _pluginMatchers = [];
       foreach (var plugin in _pluginSettingsList) {
         var matcher = new Matcher();
         matcher.AddIncludePatterns(plugin.IncludePatterns);
@@ -92,7 +92,7 @@ namespace LogTapestry.Ingester
           }
         }
 
-        foreach (var result in parser.Parse(buffer.ToArray())) {
+        foreach (var result in parser.Parse([.. buffer])) {
           await outputChannel.WriteAsync(result, token);
         }
 

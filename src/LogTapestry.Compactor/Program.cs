@@ -6,11 +6,15 @@ namespace LogTapestry.Compactor
   {
     static int Main(string[] args)
     {
-      var dataOption = new Option<string>("--data") { Arity = ArgumentArity.ExactlyOne };
-      dataOption.Description = "Root directory of the Parquet data store";
+      var dataOption = new Option<string>("--data") {
+        Arity = ArgumentArity.ExactlyOne,
+        Description = "Root directory of the Parquet data store"
+      };
 
-      var compactOlderThanOption = new Option<string>("--compact-older-than") { Arity = ArgumentArity.ExactlyOne };
-      compactOlderThanOption.Description = "Do not compact partitions newer than this timespan (e.g., '1h', '2d')";
+      var compactOlderThanOption = new Option<string>("--compact-older-than") {
+        Arity = ArgumentArity.ExactlyOne,
+        Description = "Do not compact partitions newer than this timespan (e.g., '1h', '2d')"
+      };
 
       var rootCommand = new RootCommand("LogTapestry Compactor Utility")
       {
@@ -18,7 +22,7 @@ namespace LogTapestry.Compactor
                 compactOlderThanOption
             };
 
-      rootCommand.SetAction(async (ParseResult parseResult) => {
+      rootCommand.SetAction(async parseResult => {
         var data = parseResult.GetValue(dataOption);
         var compactOlderThan = parseResult.GetValue(compactOlderThanOption);
         if (string.IsNullOrEmpty(compactOlderThan)) compactOlderThan = "1h";

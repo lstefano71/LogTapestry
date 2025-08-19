@@ -12,8 +12,7 @@ namespace LogTapestry.Core
       using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
       var handle = fs.SafeFileHandle.DangerousGetHandle();
 
-      BY_HANDLE_FILE_INFORMATION info;
-      if (!GetFileInformationByHandle(handle, out info))
+      if (!GetFileInformationByHandle(handle, out BY_HANDLE_FILE_INFORMATION info))
         return null;
 
       long volumeSerial = info.dwVolumeSerialNumber;

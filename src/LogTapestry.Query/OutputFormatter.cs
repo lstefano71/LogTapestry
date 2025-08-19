@@ -38,8 +38,8 @@ namespace LogTapestry.Query
 
     public void WriteHeader(IEnumerable<string> columnNames)
     {
-      _jsonRows = new List<Dictionary<string, object>>();
-      _jsonColumns = columnNames.ToArray();
+      _jsonRows = [];
+      _jsonColumns = [.. columnNames];
     }
 
     public void WriteRow(object[] values)
@@ -63,7 +63,7 @@ namespace LogTapestry.Query
 
     public void WriteHeader(IEnumerable<string> columnNames)
     {
-      _csvColumns = columnNames.ToArray();
+      _csvColumns = [.. columnNames];
       Console.Out.WriteLine(string.Join(",", _csvColumns));
     }
 

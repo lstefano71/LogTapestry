@@ -71,7 +71,7 @@ public class Program
     ));
     builder.Services.AddSingleton<TailingManager>(sp => new TailingManager(
       sp.GetRequiredService<IStateProvider>(),
-      builder.Configuration.GetSection("Plugins").Get<List<PluginSettings>>() ?? new List<PluginSettings>(),
+      builder.Configuration.GetSection("Plugins").Get<List<PluginSettings>>() ?? [],
       sp.GetRequiredService<ILoggerFactory>(),
       sp.GetRequiredService<IOptions<IngesterSettings>>().Value
     ));

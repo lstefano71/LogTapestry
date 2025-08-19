@@ -34,7 +34,7 @@ namespace LogTapestry.Query
       string whereClause = whereMatch.Success ? whereMatch.Groups[1].Value : "";
       var staticConds = new List<string>();
       var dynamicConds = new List<string>();
-      foreach (var cond in whereClause.Split(new[] { "AND" }, StringSplitOptions.RemoveEmptyEntries)) {
+      foreach (var cond in whereClause.Split(["AND"], StringSplitOptions.RemoveEmptyEntries)) {
         var trimmed = cond.Trim();
         var found = false;
         foreach (var kvp in typeMap) {
