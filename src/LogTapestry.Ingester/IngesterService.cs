@@ -101,8 +101,12 @@ namespace LogTapestry.Ingester
     {
       if (batch.Count == 0) return;
       try {
+        // Assign ULID to each entry
+        var ulidBatch = batch.Select(e =>
+          e with { Ulid = Ulid.NewUlid().ToByteArray() }
+        ).ToList();
         // Use the timestamp of the first entry for partitioning
-        var firstEntryTimestamp = batch[0].Timestamp.ToUniversalTime();
+        var firstEntryTimestamp = ulidBatch[0].Timestamp.ToUniversalTime();
         var dataRoot = _settings.Ingester.DataRoot ?? "data";
         var partitionPath = Path.Combine(
           dataRoot,
@@ -115,12 +119,12 @@ namespace LogTapestry.Ingester
         var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet.tmp");
         var finalFilePath = Path.ChangeExtension(tempFilePath, ".parquet");
         await using (var stream = File.Create(tempFilePath)) {
-          await _dataSink.WriteBatchAsync([.. batch], stream);
+          await _dataSink.WriteBatchAsync([.. ulidBatch], stream);
         }
         File.Move(tempFilePath, finalFilePath);
         _logger.LogInformation(
           "Wrote batch of {Count} entries to {Path}",
-          batch.Count,
+          ulidBatch.Count,
           finalFilePath
         );
       } catch (Exception ex) {

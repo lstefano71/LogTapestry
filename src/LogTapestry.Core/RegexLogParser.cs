@@ -69,9 +69,8 @@ namespace LogTapestry.Core
         }
       }
 
-      // Generate ULID
-      var ulid = Ulid.NewUlid().ToByteArray();
-      return new LogEntry(timestamp, level, message, _sourceFile, 0, fields, ulid);
+      // ULID will be assigned by the ingestion system
+      return new LogEntry(timestamp, level, message, _sourceFile, 0, fields, Array.Empty<byte>());
     }
 
     private ParsingResult FinalizeEntry()
