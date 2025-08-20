@@ -12,6 +12,11 @@ namespace LogTapestry.Core
     private readonly ILogger? _logger;
     private readonly Regex _startOfEntryRegex;
 
+    // State for multi-line parsing
+    private StringBuilder _multiLineBuffer = new();
+    private LogEntry? _inProgressEntry = null;
+    private bool _entryParseFailed = false;
+
     public RegexLogParser(PluginSettings settings, string sourceFile, ILogger? logger = null)
     {
       _settings = settings;
@@ -35,32 +40,35 @@ namespace LogTapestry.Core
         yield break;
       }
 
-      // Multi-line mode: current logic
-      StringBuilder multiLineBuffer = new();
-      LogEntry? inProgressEntry = null;
-      bool entryParseFailed = false;
-
+      // Multi-line mode: maintain state across batches
       foreach (var line in lines) {
         if (_startOfEntryRegex.IsMatch(line)) {
-          if (inProgressEntry != null) {
-            yield return FinalizeEntry(multiLineBuffer, inProgressEntry, entryParseFailed);
+          // If we have an in-progress entry, finalize and yield it
+          if (_inProgressEntry != null) {
+            yield return FinalizeEntry(_multiLineBuffer, _inProgressEntry, _entryParseFailed);
           }
-          (inProgressEntry, entryParseFailed) = StartNewEntry(line);
-          multiLineBuffer.Clear();
-          multiLineBuffer.AppendLine(line);
+          // Start new entry
+          (_inProgressEntry, _entryParseFailed) = StartNewEntry(line);
+          _multiLineBuffer.Clear();
+          _multiLineBuffer.AppendLine(line);
         } else {
-          multiLineBuffer.AppendLine(line);
+          // Continue accumulating lines for the current entry
+          _multiLineBuffer.AppendLine(line);
         }
       }
-      // Finalize and emit the last entry if present
-      if (inProgressEntry != null) {
-        yield return FinalizeEntry(multiLineBuffer, inProgressEntry, entryParseFailed);
-      }
+      // Do not finalize here; leave incomplete entry buffered for next batch or flush
     }
 
     public ParsingResult? Flush()
     {
-      // Stateless: nothing to flush
+      // Emit any remaining buffered entry
+      if (_inProgressEntry != null && _multiLineBuffer.Length > 0) {
+        var result = FinalizeEntry(_multiLineBuffer, _inProgressEntry, _entryParseFailed);
+        _inProgressEntry = null;
+        _multiLineBuffer.Clear();
+        _entryParseFailed = false;
+        return result;
+      }
       return null;
     }
 

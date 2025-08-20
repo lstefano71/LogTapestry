@@ -59,7 +59,7 @@ namespace LogTapestry.Ingester
     {
 
       // Get the plugin for this file
-      var plugin = GetPluginForFile(request.FilePath);
+      var plugin = InstantiateParserPlugin(request.FilePath);
       if (plugin == null) {
         _logger.LogWarning("No plugin matched for file: {FilePath}", request.FilePath);
         yield break;
@@ -85,48 +85,43 @@ namespace LogTapestry.Ingester
       fs.Seek(position, SeekOrigin.Begin);
 
       var parser = parserFactory(plugin, request.FilePath, _loggerFactory);
-      var currentPosition = position;
-      var buffer = new List<string>();
       var successfulEntries = new List<LogEntry>();
+      var currentPosition = position;
+      var emittedEntries = 0;
       var maxEntriesPerBlock = _settings.Value.Ingester.MaxEntriesPerDataBlock;
 
-      using (var sr = new StreamReader(fs, leaveOpen: true)) {
-        string? line;
-        while ((line = await sr.ReadLineAsync(token)) != null) {
-          buffer.Add(line);
-          currentPosition = fs.Position;
+      await foreach (var (buffer, pos) in ReadBlockOfLines(fs, 100, token)) {
+        currentPosition = pos;
+        // Parse line immediately to avoid large buffers
+        var results = parser.Parse(buffer);
 
-          // Parse line immediately to avoid large buffers
-          var results = parser.Parse(new List<string> { line });
-
-          // Collect successful parsing results
-          foreach (var result in results) {
-            if (result.IsSuccess && result.Entry != null) {
-              successfulEntries.Add(result.Entry);
-              _logger.LogTrace("Parsed log entry from {FilePath}", request.FilePath);
-            } else {
-              _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
-                result.ErrorMessage, result.Source);
-            }
+        // Collect successful parsing results
+        foreach (var result in results) {
+          if (result.IsSuccess && result.Entry != null) {
+            successfulEntries.Add(result.Entry);
+            _logger.LogTrace("Parsed log entry from {FilePath}", request.FilePath);
+          } else {
+            _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
+              result.ErrorMessage, result.Source);
           }
+        }
 
-          // Yield DataBlock if we've reached the entry limit
-          if (successfulEntries.Count >= maxEntriesPerBlock) {
-            var dataBlock = new DataBlock(
-              FileId: request.FileId,
-              VolumeSerial: request.VolumeSerial,
-              FilePath: request.FilePath,
-              EndPosition: currentPosition,
-              LastWriteTime: new DateTime(request.LastWriteTimeUtc, DateTimeKind.Utc),
-              Entries: successfulEntries.ToList() // Create a copy
-            );
+        // Yield DataBlock if we've reached the entry limit
+        if (successfulEntries.Count >= maxEntriesPerBlock) {
+          var dataBlock = new DataBlock(
+            FileId: request.FileId,
+            VolumeSerial: request.VolumeSerial,
+            FilePath: request.FilePath,
+            EndPosition: currentPosition,
+            LastWriteTime: new DateTime(request.LastWriteTimeUtc, DateTimeKind.Utc),
+            Entries: [.. successfulEntries] // Create a copy
+          );
+          emittedEntries += successfulEntries.Count;
+          _logger.LogDebug("Created DataBlock chunk for {FilePath}: {EntryCount} entries, position {Position}",
+            request.FilePath, successfulEntries.Count, currentPosition);
 
-            _logger.LogDebug("Created DataBlock chunk for {FilePath}: {EntryCount} entries, position {Position}",
-              request.FilePath, successfulEntries.Count, currentPosition);
-
-            yield return dataBlock;
-            successfulEntries.Clear();
-          }
+          yield return dataBlock;
+          successfulEntries.Clear();
         }
       }
 
@@ -159,8 +154,28 @@ namespace LogTapestry.Ingester
         yield return dataBlock;
       }
 
-      if (buffer.Count == 0) {
+      if (emittedEntries == 0) {
         _logger.LogTrace("No new content for {FilePath}", request.FilePath);
+      }
+    }
+    /// <summary>
+    /// Read the next block of lines from the file stream.
+    /// </summary>
+    private async IAsyncEnumerable<(IList<string>, long)> ReadBlockOfLines(FileStream fs, int maximumNumberOfLines,
+      [EnumeratorCancellation] CancellationToken token)
+    {
+      // read at most maximumNumberOfLines lines from the file stream
+      // this is a helper method to read lines in chunks
+      var buffer = new List<string>();
+      using (var sr = new StreamReader(fs, leaveOpen: true)) {
+        string? line;
+        while ((line = await sr.ReadLineAsync(token)) != null) {
+          buffer.Add(line);
+          if (buffer.Count >= maximumNumberOfLines) {
+            yield return (buffer, fs.Position);
+            buffer.Clear();
+          }
+        }
       }
     }
 
@@ -181,7 +196,7 @@ namespace LogTapestry.Ingester
       return File.GetLastWriteTimeUtc(filePath).Ticks;
     }
 
-    private PluginSettings? GetPluginForFile(string filePath)
+    private PluginSettings? InstantiateParserPlugin(string filePath)
     {
       // Use file name for matching (same logic as original TailingManager)
       var relPath = Path.GetFileName(filePath);

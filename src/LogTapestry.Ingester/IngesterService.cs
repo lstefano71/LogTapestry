@@ -48,7 +48,7 @@ namespace LogTapestry.Ingester
       _fileReader = fileReader;
 
       // Initialize checkpointing pipeline channels
-      _dataBlockChannel = Channel.CreateBounded<DataBlock>(1000);
+      _dataBlockChannel = Channel.CreateBounded<DataBlock>(10);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

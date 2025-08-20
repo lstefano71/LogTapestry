@@ -61,7 +61,7 @@ public class CheckpointDataSink : IDataSink
     _logger = logger;
     _stateProvider = stateProvider;
     _liveStateService = liveStateService;
-    _checkpointChannel = Channel.CreateUnbounded<CheckpointPositionUpdate>();
+    _checkpointChannel = Channel.CreateBounded<CheckpointPositionUpdate>(10);
   }
 
   public ChannelReader<CheckpointPositionUpdate> CheckpointReader => _checkpointChannel.Reader;
