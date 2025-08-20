@@ -1,32 +1,58 @@
 using LogTapestry.Core;
 
+using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
 {
   /// <summary>
-  /// Static utility class for core file reading logic.
+  /// Service for core file reading logic with proper dependency injection.
   /// Replaces the file handling in TailingManager with temporary file access.
   /// </summary>
-  public static class FileReader
+  public class FileReader
   {
+    private readonly ILogger<FileReader> _logger;
+    private readonly IStateProvider _stateProvider;
+    private readonly List<PluginSettings> _pluginSettings;
+    private readonly Matcher _matcher;
+
+    public FileReader(
+      ILogger<FileReader> logger,
+      IStateProvider stateProvider,
+      IOptions<LogTapestrySettings> settings)
+    {
+      _logger = logger;
+      _stateProvider = stateProvider;
+      _pluginSettings = settings.Value.Plugins;
+
+      // Create matcher for plugin include/exclude patterns
+      _matcher = new Matcher();
+      foreach (var plugin in _pluginSettings)
+      {
+        _matcher.AddIncludePatterns(plugin.IncludePatterns);
+        _matcher.AddExcludePatterns(plugin.ExcludePatterns);
+      }
+    }
+
     /// <summary>
     /// Reads and parses a file from the given position, then immediately closes it.
     /// This prevents file handle exhaustion in the worker pool model.
     /// </summary>
-    public static async Task ReadAndParseFileAsync(
+    public async Task ReadAndParseFileAsync(
       FileCheckRequest request,
       ChannelWriter<PositionUpdate> outputChannel,
-      ILogger logger,
       CancellationToken token)
     {
-      try {
+      try
+      {
         // Get the plugin for this file
         var plugin = GetPluginForFile(request.FilePath);
-        if (plugin == null) {
-          logger.LogWarning("No plugin matched for file: {FilePath}", request.FilePath);
+        if (plugin == null)
+        {
+          _logger.LogWarning("No plugin matched for file: {FilePath}", request.FilePath);
           return;
         }
 
@@ -36,7 +62,8 @@ namespace LogTapestry.Ingester
 
         // Open file temporarily, read new content, then close immediately
         using var fs = new FileStream(request.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        if (position > fs.Length) {
+        if (position > fs.Length)
+        {
           // File was truncated, reset position
           position = 0;
         }
@@ -47,9 +74,11 @@ namespace LogTapestry.Ingester
         var newPosition = position;
         var buffer = new List<string>();
 
-        using (var sr = new StreamReader(fs, leaveOpen: true)) {
+        using (var sr = new StreamReader(fs, leaveOpen: true))
+        {
           string? line;
-          while ((line = await sr.ReadLineAsync(token)) != null) {
+          while ((line = await sr.ReadLineAsync(token)) != null)
+          {
             buffer.Add(line);
           }
         }
@@ -58,10 +87,12 @@ namespace LogTapestry.Ingester
         var results = parser.Parse([.. buffer]);
 
         // Send position update if we read new content
-        if (buffer.Count > 0) {
+        if (buffer.Count > 0)
+        {
           newPosition = fs.Position;
 
-          var positionUpdate = new PositionUpdate {
+          var positionUpdate = new PositionUpdate
+          {
             FileId = request.FileId,
             VolumeSerial = request.VolumeSerial,
             Position = newPosition,
@@ -70,28 +101,34 @@ namespace LogTapestry.Ingester
           };
 
           await outputChannel.WriteAsync(positionUpdate, token);
-          logger.LogDebug("Updated position for {FilePath}: {Position}", request.FilePath, newPosition);
+          _logger.LogDebug("Updated position for {FilePath}: {Position}", request.FilePath, newPosition);
         }
 
         // Log parsing results
-        foreach (var result in results) {
-          if (result.IsSuccess && result.Entry != null) {
+        foreach (var result in results)
+        {
+          if (result.IsSuccess && result.Entry != null)
+          {
             // In the new architecture, this would be sent to a parsing pipeline
-            logger.LogDebug("Parsed log entry from {FilePath}", request.FilePath);
-          } else {
-            logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
+            _logger.LogDebug("Parsed log entry from {FilePath}", request.FilePath);
+          }
+          else
+          {
+            _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
               result.ErrorMessage, result.Source);
           }
         }
-      } catch (Exception ex) {
-        logger.LogError(ex, "Error reading file {FilePath}", request.FilePath);
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error reading file {FilePath}", request.FilePath);
       }
     }
 
     /// <summary>
     /// Checks if a file has been rotated by comparing file IDs.
     /// </summary>
-    public static bool IsFileRotated(string filePath, ulong originalFileId)
+    public bool IsFileRotated(string filePath, ulong originalFileId)
     {
       var currentId = NtfsUtils.GetFileIdentifier(filePath);
       return currentId == null || currentId.FileId != originalFileId;
@@ -100,23 +137,35 @@ namespace LogTapestry.Ingester
     /// <summary>
     /// Gets the last write time for a file without keeping it open.
     /// </summary>
-    public static long GetLastWriteTimeUtc(string filePath)
+    public long GetLastWriteTimeUtc(string filePath)
     {
       return File.GetLastWriteTimeUtc(filePath).Ticks;
     }
 
-    private static PluginSettings? GetPluginForFile(string filePath)
+    private PluginSettings? GetPluginForFile(string filePath)
     {
-      // This would need access to the plugin settings
-      // For now, return null - this will be implemented when we refactor IngesterService
+      // Use file name for matching (same logic as original TailingManager)
+      var relPath = Path.GetFileName(filePath);
+
+      foreach (var plugin in _pluginSettings)
+      {
+        var pluginMatcher = new Matcher();
+        pluginMatcher.AddIncludePatterns(plugin.IncludePatterns);
+        pluginMatcher.AddExcludePatterns(plugin.ExcludePatterns);
+
+        if (pluginMatcher.Match(relPath).HasMatches)
+        {
+          return plugin;
+        }
+      }
+
       return null;
     }
 
-    private static async Task<long?> GetTrackedPositionAsync(FileCheckRequest request)
+    private async Task<long?> GetTrackedPositionAsync(FileCheckRequest request)
     {
-      // This would need access to the state provider
-      // For now, return null - this will be implemented when we refactor IngesterService
-      return null;
+      var trackedFile = await _stateProvider.GetTrackedFileAsync(request.FileId, request.VolumeSerial);
+      return trackedFile?.Position;
     }
   }
 }

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 using System.Threading.Channels;
+using Open.ChannelExtensions;
 
 namespace LogTapestry.Ingester
 {
@@ -20,6 +21,7 @@ namespace LogTapestry.Ingester
     private readonly StateWriterService _stateWriterService;
     private readonly DataSink _dataSink;
     private readonly IStateProvider _stateProvider;
+    private readonly FileReader _fileReader;
 
     // New declarative pipeline components
     private readonly Channel<FileCheckRequest> _fileRequestChannel;
@@ -38,7 +40,8 @@ namespace LogTapestry.Ingester
       DirectoryMonitor directoryMonitor,
       StateWriterService stateWriterService,
       DataSink dataSink,
-      IStateProvider stateProvider)
+      IStateProvider stateProvider,
+      FileReader fileReader)
     {
       _logger = logger;
       _settings = options.Value;
@@ -46,6 +49,7 @@ namespace LogTapestry.Ingester
       _stateWriterService = stateWriterService;
       _dataSink = dataSink;
       _stateProvider = stateProvider;
+      _fileReader = fileReader;
 
       // Initialize declarative pipeline channels
       _fileRequestChannel = Channel.CreateUnbounded<FileCheckRequest>();
@@ -92,27 +96,83 @@ namespace LogTapestry.Ingester
     }
 
     /// <summary>
-    /// Worker task that processes file events and converts them to file check requests.
+    /// Sets up the declarative pipeline using Open.ChannelExtensions.
+    /// Transforms file events into file requests, processes them, and handles results.
+    /// </summary>
+    private async Task SetupDeclarativePipelineAsync(CancellationToken token)
+    {
+      // Pipeline: FileEvent -> FileCheckRequest -> PositionUpdate -> Batched DB Update
+      var pipeline = _directoryMonitor.FileEvents
+        .Transform(async fileEvent =>
+        {
+          // Transform FileEvent to FileCheckRequest
+          var fileRequest = new FileCheckRequest
+          {
+            FileId = fileEvent.FileId,
+            VolumeSerial = fileEvent.VolumeSerial,
+            FilePath = fileEvent.FilePath,
+            LastWriteTimeUtc = fileEvent.LastWriteTimeUtc,
+            Type = fileEvent.Type
+          };
+
+          // Process the file and get position update
+          await _fileReader.ReadAndParseFileAsync(
+            fileRequest,
+            _positionUpdateChannel.Writer,
+            token);
+
+          return fileRequest;
+        })
+        .Batch(_settings.Ingester.StateWriterBatchSize)  // Batch file requests
+        .Transform(async batch =>
+        {
+          // Process batch of position updates
+          var positionUpdates = new List<PositionUpdate>();
+          foreach (var _ in batch)
+          {
+            if (_positionUpdateChannel.Reader.TryRead(out var update))
+            {
+              positionUpdates.Add(update);
+            }
+          }
+
+          if (positionUpdates.Any())
+          {
+            // Send batch to state writer service
+            foreach (var update in positionUpdates)
+            {
+              await _stateWriterService.Writer.WriteAsync(update, token);
+            }
+          }
+
+          return positionUpdates;
+        });
+
+      // Consume the pipeline
+      await foreach (var resultTask in pipeline.ReadAllAsync(token))
+      {
+        // Pipeline results are consumed here
+        var result = await resultTask;
+        _logger.LogDebug("Processed batch of {Count} file requests", result.Count);
+      }
+    }
+
+    /// <summary>
+    /// Worker task that runs the declarative pipeline.
     /// </summary>
     private async Task ProcessFileEventsAsync(CancellationToken token)
     {
-      await foreach (var fileEvent in _directoryMonitor.FileEvents.ReadAllAsync(token)) {
-        var fileRequest = new FileCheckRequest {
-          FileId = fileEvent.FileId,
-          VolumeSerial = fileEvent.VolumeSerial,
-          FilePath = fileEvent.FilePath,
-          LastWriteTimeUtc = fileEvent.LastWriteTimeUtc,
-          Type = fileEvent.Type
-        };
-
-        await _fileRequestChannel.Writer.WriteAsync(fileRequest, token);
-
-        // Process the file using FileReader
-        await FileReader.ReadAndParseFileAsync(
-          fileRequest,
-          _positionUpdateChannel.Writer,
-          _logger,
-          token);
+      try
+      {
+        await SetupDeclarativePipelineAsync(token);
+      }
+      catch (OperationCanceledException)
+      {
+        _logger.LogInformation("Pipeline processing cancelled");
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error in declarative pipeline");
       }
     }
 

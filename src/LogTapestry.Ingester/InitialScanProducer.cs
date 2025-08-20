@@ -5,6 +5,7 @@ using Microsoft.Extensions.FileSystemGlobbing.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
@@ -48,7 +49,7 @@ namespace LogTapestry.Ingester
         _logger.LogInformation("Starting parallel initial directory scan of {Directory}", _settings.Directory);
 
         var trackedFiles = await _stateProvider.GetAllTrackedFilesAsync();
-        var seen = new HashSet<ulong>();
+        var seen = new ConcurrentBag<ulong>();
 
         var dirRoot = new DirectoryInfo(_settings.Directory);
         var dirWrapper = new DirectoryInfoWrapper(dirRoot);

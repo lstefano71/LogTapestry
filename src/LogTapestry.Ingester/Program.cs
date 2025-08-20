@@ -53,9 +53,9 @@ public class Program
     });
 
     // Bind configuration
-    builder.Services.Configure<LogTapestrySettings>(builder.Configuration.GetSection(""));
+    builder.Services.Configure<LogTapestrySettings>(builder.Configuration); // Bind to root
     builder.Services.Configure<IngesterSettings>(builder.Configuration.GetSection("Ingester"));
-    builder.Services.Configure<PluginSettings>(builder.Configuration.GetSection("Plugins:0"));
+
     builder.Services.AddOptions<IngesterSettings>()
         .Bind(builder.Configuration.GetSection("Ingester"))
         .ValidateDataAnnotations();
@@ -83,6 +83,7 @@ public class Program
     builder.Services.AddWindowsService(options => options.ServiceName = "LogTapestry Ingester");
 
     builder.Services.AddSingleton<StateWriterService>();
+    builder.Services.AddSingleton<FileReader>();
 
     var host = builder.Build();
 
