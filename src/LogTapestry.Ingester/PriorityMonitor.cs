@@ -61,7 +61,7 @@ namespace LogTapestry.Ingester
           // Track that we've seen this file
           _seenEvents.Add(key);
 
-          await _outputChannel.Writer.WriteAsync(fileEvent, token);
+          await Writer.WriteAsync(fileEvent, token);
 
           _logger.LogDebug("Processed {ChannelType} event: {Type} {FilePath}",
             isFastChannel ? "fast" : "slow", fileEvent.Type, fileEvent.FilePath);

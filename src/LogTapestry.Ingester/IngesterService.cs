@@ -18,7 +18,6 @@ namespace LogTapestry.Ingester
     private readonly DirectoryMonitor _directoryMonitor;
     private readonly StateWriterService _stateWriterService;
     private readonly CheckpointDataSink _checkpointDataSink;
-    private readonly LiveStateService _liveStateService;
     private readonly FileReader _fileReader;
 
     // Checkpointing pipeline components
@@ -36,7 +35,6 @@ namespace LogTapestry.Ingester
       DirectoryMonitor directoryMonitor,
       StateWriterService stateWriterService,
       CheckpointDataSink checkpointDataSink,
-      LiveStateService liveStateService,
       FileReader fileReader)
     {
       _logger = logger;
@@ -44,11 +42,10 @@ namespace LogTapestry.Ingester
       _directoryMonitor = directoryMonitor;
       _stateWriterService = stateWriterService;
       _checkpointDataSink = checkpointDataSink;
-      _liveStateService = liveStateService;
       _fileReader = fileReader;
 
       // Initialize checkpointing pipeline channels
-      _dataBlockChannel = Channel.CreateBounded<DataBlock>(2);
+      _dataBlockChannel = Channel.CreateBounded<DataBlock>(10);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -114,7 +111,7 @@ namespace LogTapestry.Ingester
 
             if (dataBlock != null) {
               // Send DataBlock to checkpointing data sink
-              _logger.LogDebug("Sending DataBlock for {FilePath}: {EntryCount} entries, {Position}...",
+              _logger.LogTrace("Sending DataBlock for {FilePath}: {EntryCount} entries, {Position}...",
                 fileEvent.FilePath, dataBlock.Entries.Count, dataBlock.EndPosition);
               await _dataBlockChannel.Writer.WriteAsync(dataBlock, token);
               _logger.LogDebug("Sent DataBlock for {FilePath}: {EntryCount} entries, {Position}",
@@ -122,6 +119,8 @@ namespace LogTapestry.Ingester
             }
           }
         }
+      } catch (OperationCanceledException) {
+        _logger.LogInformation("File event processing cancelled");
       } catch (Exception ex) {
         _logger.LogError(ex, "Error processing file event for {FilePath}", lastEvent?.FilePath);
       }
@@ -162,7 +161,7 @@ namespace LogTapestry.Ingester
               batch.Add(dataBlock);
 
               // Process batch if it reaches the size limit
-              if (batch.Count >= _settings.Ingester.BatchSize) {
+              if (batch.Sum(dblock => dblock.Entries.Count) >= _settings.Ingester.BatchSize) {
                 await ProcessDataBlockBatch(batch);
                 batch.Clear();
               }

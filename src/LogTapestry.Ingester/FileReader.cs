@@ -178,7 +178,7 @@ namespace LogTapestry.Ingester
           buffer.Clear();
         }
       }
-      if(buffer.Count > 0) {
+      if (buffer.Count > 0) {
         yield return (buffer, fs.Position);
       }
     }

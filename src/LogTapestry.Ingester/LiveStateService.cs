@@ -31,7 +31,7 @@ public class LiveStateService : IStateProvider, IHostedService
   {
     _logger = logger;
     _persistentStateProvider = persistentStateProvider;
-    _checkpointChannel = Channel.CreateBounded<CheckpointPositionUpdate>(100);
+    _checkpointChannel = Channel.CreateUnbounded<CheckpointPositionUpdate>();
   }
 
   /// <summary>

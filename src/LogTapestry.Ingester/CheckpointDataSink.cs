@@ -65,6 +65,7 @@ public class CheckpointDataSink : IDataSink
   }
 
   public ChannelReader<CheckpointPositionUpdate> CheckpointReader => _checkpointChannel.Reader;
+  ChannelWriter<CheckpointPositionUpdate> CheckpointWriter => _checkpointChannel.Writer;
 
   /// <summary>
   /// Coordinated batch write and checkpoint update.
@@ -101,7 +102,7 @@ public class CheckpointDataSink : IDataSink
               DateTime.UtcNow
           );
 
-          await _checkpointChannel.Writer.WriteAsync(checkpointUpdate, token);
+          await CheckpointWriter.WriteAsync(checkpointUpdate, token);
 
           // Update the live state service (this will queue SQLite persistence)
           await _liveStateService.UpdatePosition(
