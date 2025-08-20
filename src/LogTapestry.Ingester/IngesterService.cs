@@ -1,18 +1,15 @@
-// C#
 using LogTapestry.Core;
 
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-
-using Open.ChannelExtensions;
 
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
 {
   /// <summary>
-  /// Refactored IngesterService using declarative worker pool architecture.
-  /// Replaces the old TailingManager-based model with a scalable channel-based pipeline.
+  /// Checkpointing IngesterService using coordinated state update model.
+  /// Implements atomic data and state persistence to prevent race conditions.
   /// </summary>
   public class IngesterService : IHostedService
   {
@@ -20,19 +17,17 @@ namespace LogTapestry.Ingester
     private readonly LogTapestrySettings _settings;
     private readonly DirectoryMonitor _directoryMonitor;
     private readonly StateWriterService _stateWriterService;
-    private readonly DataSink _dataSink;
-    private readonly IStateProvider _stateProvider;
+    private readonly CheckpointDataSink _checkpointDataSink;
+    private readonly LiveStateService _liveStateService;
     private readonly FileReader _fileReader;
 
-    // New declarative pipeline components
-    private readonly Channel<FileCheckRequest> _fileRequestChannel;
-    private readonly Channel<PositionUpdate> _positionUpdateChannel;
-    private readonly Channel<ParsingResult> _parsingResultChannel;
+    // Checkpointing pipeline components
+    private readonly Channel<DataBlock> _dataBlockChannel;
 
     private Task? _directoryMonitorTask;
     private Task? _stateWriterTask;
     private Task? _workerPoolTask;
-    private Task? _consumerTask;
+    private Task? _dataSinkTask;
     private CancellationTokenSource? _cts;
 
     public IngesterService(
@@ -40,31 +35,29 @@ namespace LogTapestry.Ingester
       Microsoft.Extensions.Options.IOptions<LogTapestrySettings> options,
       DirectoryMonitor directoryMonitor,
       StateWriterService stateWriterService,
-      DataSink dataSink,
-      IStateProvider stateProvider,
+      CheckpointDataSink checkpointDataSink,
+      LiveStateService liveStateService,
       FileReader fileReader)
     {
       _logger = logger;
       _settings = options.Value;
       _directoryMonitor = directoryMonitor;
       _stateWriterService = stateWriterService;
-      _dataSink = dataSink;
-      _stateProvider = stateProvider;
+      _checkpointDataSink = checkpointDataSink;
+      _liveStateService = liveStateService;
       _fileReader = fileReader;
 
-      // Initialize declarative pipeline channels
-      _fileRequestChannel = Channel.CreateUnbounded<FileCheckRequest>();
-      _positionUpdateChannel = Channel.CreateUnbounded<PositionUpdate>();
-      _parsingResultChannel = Channel.CreateBounded<ParsingResult>(10000);
+      // Initialize checkpointing pipeline channels
+      _dataBlockChannel = Channel.CreateBounded<DataBlock>(1000);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-      _logger.LogInformation("Starting declarative worker pool architecture");
+      _logger.LogInformation("Starting checkpointing architecture");
 
       _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-      // Start directory monitoring pipeline
+      // Start directory monitoring
       _directoryMonitorTask = _directoryMonitor.RunAsync(_cts.Token);
 
       // Start state writer service
@@ -73,8 +66,8 @@ namespace LogTapestry.Ingester
       // Start worker pool for file processing
       _workerPoolTask = StartWorkerPoolAsync(_cts.Token);
 
-      // Start consumer pipeline for parsing results
-      _consumerTask = StartConsumerPipelineAsync(_cts.Token);
+      // Start data sink pipeline
+      _dataSinkTask = StartDataSinkPipelineAsync(_cts.Token);
 
       return Task.CompletedTask;
     }
@@ -97,14 +90,14 @@ namespace LogTapestry.Ingester
     }
 
     /// <summary>
-    /// Sets up the declarative pipeline using Open.ChannelExtensions.
-    /// Transforms file events into file requests, processes them, and handles results.
+    /// Sets up the checkpointing pipeline.
+    /// Transforms file events into DataBlocks and processes them atomically.
     /// </summary>
-    private async Task SetupDeclarativePipelineAsync(CancellationToken token)
+    private async Task SetupCheckpointingPipelineAsync(CancellationToken token)
     {
-      // Pipeline: FileEvent -> FileCheckRequest -> PositionUpdate -> Batched DB Update
-      var pipeline = _directoryMonitor.FileEvents
-        .Transform(async fileEvent => {
+      // Pipeline: FileEvent -> FileCheckRequest -> DataBlock -> CheckpointDataSink
+      await foreach (var fileEvent in _directoryMonitor.FileEvents.ReadAllAsync(token)) {
+        try {
           // Transform FileEvent to FileCheckRequest
           var fileRequest = new FileCheckRequest {
             FileId = fileEvent.FileId,
@@ -114,134 +107,86 @@ namespace LogTapestry.Ingester
             Type = fileEvent.Type
           };
 
-          // Process the file and get position update
-          await _fileReader.ReadAndParseFileAsync(
-            fileRequest,
-            _positionUpdateChannel.Writer,
-            _parsingResultChannel.Writer,
-            token);
+          // Process the file and get DataBlock
+          var dataBlock = await _fileReader.ReadAndCreateDataBlockAsync(fileRequest, token);
 
-          return fileRequest;
-        })
-        .Batch(_settings.Ingester.StateWriterBatchSize)  // Batch file requests
-        .WithTimeout(_settings.Ingester.PollingIntervalMs)
-        .Transform(async batch => {
-          // Process batch of position updates
-          var positionUpdates = new List<PositionUpdate>();
-          foreach (var _ in batch) {
-            if (_positionUpdateChannel.Reader.TryRead(out var update)) {
-              positionUpdates.Add(update);
-            }
+          if (dataBlock != null) {
+            // Send DataBlock to checkpointing data sink
+            await _dataBlockChannel.Writer.WriteAsync(dataBlock, token);
+            _logger.LogDebug("Sent DataBlock for {FilePath}: {EntryCount} entries",
+              fileEvent.FilePath, dataBlock.Entries.Count);
           }
-
-          if (positionUpdates.Any()) {
-            // Send batch to state writer service
-            foreach (var update in positionUpdates) {
-              await _stateWriterService.Writer.WriteAsync(update, token);
-            }
-          }
-
-          return positionUpdates;
-        });
-
-      // Consume the pipeline
-      await foreach (var resultTask in pipeline.ReadAllAsync(token)) {
-        // Pipeline results are consumed here
-        var result = await resultTask;
-        _logger.LogDebug("Processed batch of {Count} file requests", result.Count);
+        } catch (Exception ex) {
+          _logger.LogError(ex, "Error processing file event for {FilePath}", fileEvent.FilePath);
+        }
       }
     }
 
     /// <summary>
-    /// Worker task that runs the declarative pipeline.
+    /// Worker task that runs the checkpointing pipeline.
     /// </summary>
     private async Task ProcessFileEventsAsync(CancellationToken token)
     {
       try {
-        await SetupDeclarativePipelineAsync(token);
+        await SetupCheckpointingPipelineAsync(token);
       } catch (OperationCanceledException) {
-        _logger.LogInformation("Pipeline processing cancelled");
+        _logger.LogInformation("Checkpointing pipeline cancelled");
       } catch (Exception ex) {
-        _logger.LogError(ex, "Error in declarative pipeline");
+        _logger.LogError(ex, "Error in checkpointing pipeline");
       }
     }
 
     /// <summary>
-    /// Starts the consumer pipeline that processes parsing results.
+    /// Starts the data sink pipeline that processes DataBlocks with checkpointing.
     /// </summary>
-    private async Task StartConsumerPipelineAsync(CancellationToken token)
+    private async Task StartDataSinkPipelineAsync(CancellationToken token)
     {
-      _logger.LogInformation("Starting consumer pipeline");
+      _logger.LogInformation("Starting checkpointing data sink pipeline");
 
-      var batch = new List<LogEntry>();
+      var batch = new List<DataBlock>();
       using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
 
       try {
         while (await timer.WaitForNextTickAsync(token)) {
           try {
-            // Drain parsing results
-            while (_parsingResultChannel.Reader.TryRead(out var result)) {
-              if (result.IsSuccess && result.Entry != null) {
-                batch.Add(result.Entry);
-              } else {
-                _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
-                  result.ErrorMessage, result.Source);
-              }
+            // Drain DataBlocks into batch
+            while (_dataBlockChannel.Reader.TryRead(out var dataBlock)) {
+              batch.Add(dataBlock);
 
-              // Write batch if it reaches the size limit
+              // Process batch if it reaches the size limit
               if (batch.Count >= _settings.Ingester.BatchSize) {
-                await WriteBatch(batch);
+                await ProcessDataBlockBatch(batch);
                 batch.Clear();
               }
             }
 
-            // Write remaining batch items
+            // Process remaining batch items
             if (batch.Count > 0) {
-              await WriteBatch(batch);
+              await ProcessDataBlockBatch(batch);
               batch.Clear();
             }
           } catch (Exception ex) {
-            _logger.LogError(ex, "Error in consumer pipeline iteration");
+            _logger.LogError(ex, "Error in data sink pipeline iteration");
           }
         }
       } catch (OperationCanceledException) {
-        _logger.LogInformation("Consumer pipeline cancelled");
+        _logger.LogInformation("Data sink pipeline cancelled");
       }
     }
 
-    private async Task WriteBatch(List<LogEntry> batch)
+    private async Task ProcessDataBlockBatch(List<DataBlock> batch)
     {
       if (batch.Count == 0) return;
+
       try {
-        // Assign ULID to each entry
-        var ulidBatch = batch.Select(e =>
-          e with { Ulid = Ulid.NewUlid().ToByteArray() }
-        ).ToList();
-        // Use the timestamp of the first entry for partitioning
-        var firstEntryTimestamp = ulidBatch[0].Timestamp.ToUniversalTime();
-        var dataRoot = _settings.Ingester.DataRoot ?? "data";
-        var partitionPath = Path.Combine(
-          dataRoot,
-          $"year={firstEntryTimestamp.Year}",
-          $"month={firstEntryTimestamp.Month:D2}",
-          $"day={firstEntryTimestamp.Day:D2}",
-          "landing"
-        );
-        Directory.CreateDirectory(partitionPath);
-        var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet_tmp");
-        var finalFilePath = Path.ChangeExtension(tempFilePath, ".parquet");
-        await using (var stream = File.Create(tempFilePath)) {
-          await _dataSink.WriteBatchAsync([.. ulidBatch], stream, finalFilePath, partitionPath);
-        }
-        File.Move(tempFilePath, finalFilePath);
-        _logger.LogInformation(
-          "Wrote batch of {Count} entries to {Path}",
-          ulidBatch.Count,
-          finalFilePath
-        );
+        // Use checkpointing data sink to ensure atomic data and state persistence
+        await _checkpointDataSink.WriteBatchAndCheckpointStateAsync(batch.ToArray());
+        _logger.LogInformation("Checkpointed batch of {Count} data blocks", batch.Count);
       } catch (Exception ex) {
-        _logger.LogError(ex, "Failed to write batch of {Count} log entries. Data may be lost.", batch.Count);
-        // Optionally implement retry logic here
+        _logger.LogError(ex, "Failed to checkpoint batch of {Count} data blocks", batch.Count);
+        // In checkpointing model, we don't continue processing on failure
+        // The atomic nature means partial failures require investigation
+        throw;
       }
     }
 
@@ -268,13 +213,13 @@ namespace LogTapestry.Ingester
       if (_directoryMonitorTask != null) tasks.Add(_directoryMonitorTask);
       if (_stateWriterTask != null) tasks.Add(_stateWriterTask);
       if (_workerPoolTask != null) tasks.Add(_workerPoolTask);
-      if (_consumerTask != null) tasks.Add(_consumerTask);
+      if (_dataSinkTask != null) tasks.Add(_dataSinkTask);
 
       if (tasks.Any()) {
         await Task.WhenAll(tasks);
       }
 
-      _logger.LogInformation("Declarative worker pool architecture stopped");
+      _logger.LogInformation("Checkpointing architecture stopped");
     }
   }
 }

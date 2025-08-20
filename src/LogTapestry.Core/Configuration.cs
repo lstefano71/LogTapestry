@@ -26,6 +26,11 @@ public class IngesterSettings
   public int StateWriterBatchSize { get; set; } = 1000;
   public int StateWriterIntervalSeconds { get; set; } = 2;
   public int FileSystemWatcherBufferSize { get; set; } = 65536;
+
+  // Checkpointing configuration
+  public int BatchSizeInBlocks { get; set; } = 100; // DataBlock batch size
+  public TimeSpan BatchTimeout { get; set; } = TimeSpan.FromSeconds(30);
+  public bool EnableCheckpointing { get; set; } = true; // Enable/disable checkpointing
 }
 
 public class PluginSettings

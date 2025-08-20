@@ -4,8 +4,6 @@ using Microsoft.Extensions.FileSystemGlobbing;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-using System.Threading.Channels;
-
 namespace LogTapestry.Ingester
 {
   /// <summary>
@@ -48,13 +46,11 @@ namespace LogTapestry.Ingester
     }
 
     /// <summary>
-    /// Reads and parses a file from the given position, then immediately closes it.
-    /// This prevents file handle exhaustion in the worker pool model.
+    /// Reads and parses a file from the given position and returns a DataBlock.
+    /// This is the new checkpointing pipeline that combines data and position context.
     /// </summary>
-    public async Task ReadAndParseFileAsync(
+    public async Task<DataBlock?> ReadAndCreateDataBlockAsync(
       FileCheckRequest request,
-      ChannelWriter<PositionUpdate> positionChannel,
-      ChannelWriter<ParsingResult> parsingChannel,
       CancellationToken token)
     {
       try {
@@ -62,13 +58,13 @@ namespace LogTapestry.Ingester
         var plugin = GetPluginForFile(request.FilePath);
         if (plugin == null) {
           _logger.LogWarning("No plugin matched for file: {FilePath}", request.FilePath);
-          return;
+          return null;
         }
 
         // Select parser factory based on plugin.Type
         if (!ParserFactories.TryGetValue(plugin.Type, out var parserFactory)) {
           _logger.LogError("No parser available for plugin type: {Type} (file: {FilePath})", plugin.Type, request.FilePath);
-          return;
+          return null;
         }
 
         // Get current tracked position
@@ -97,32 +93,14 @@ namespace LogTapestry.Ingester
 
         // Parse the new content
         var results = parser.Parse([.. buffer]);
+        var successfulEntries = new List<LogEntry>();
 
-        // Send position update if we read new content
-        if (buffer.Count > 0) {
-          newPosition = fs.Position;
-
-          var positionUpdate = new PositionUpdate {
-            FileId = request.FileId,
-            VolumeSerial = request.VolumeSerial,
-            Position = newPosition,
-            FilePath = request.FilePath,
-            LastWriteTimeUtc = request.LastWriteTimeUtc
-          };
-
-          await positionChannel.WriteAsync(positionUpdate, token);
-          _logger.LogDebug("Updated position for {FilePath}: {Position}", request.FilePath, newPosition);
-        }
-
-        // Send parsing results to the next pipeline stage
+        // Collect successful parsing results
         foreach (var result in results) {
           if (result.IsSuccess && result.Entry != null) {
-            // Send successful parsing result to the parsing pipeline
-            await parsingChannel.WriteAsync(result, token);
-            _logger.LogTrace("Sent parsed log entry from {FilePath} to parsing pipeline", request.FilePath);
+            successfulEntries.Add(result.Entry);
+            _logger.LogTrace("Parsed log entry from {FilePath}", request.FilePath);
           } else {
-            // Send failed parsing result as well for error handling
-            await parsingChannel.WriteAsync(result, token);
             _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
               result.ErrorMessage, result.Source);
           }
@@ -131,17 +109,41 @@ namespace LogTapestry.Ingester
         // Flush the parser to emit any buffered result (e.g., last line/event)
         var flushResult = parser.Flush();
         if (flushResult != null) {
-          await parsingChannel.WriteAsync(flushResult, token);
           if (flushResult.IsSuccess && flushResult.Entry != null) {
-            _logger.LogTrace("Sent flushed parsed log entry from {FilePath} to parsing pipeline", request.FilePath);
+            successfulEntries.Add(flushResult.Entry);
+            _logger.LogTrace("Parsed flushed log entry from {FilePath}", request.FilePath);
           } else {
             _logger.LogWarning("Log parsing failed on flush: {ErrorMessage}. Source: {Source}",
               flushResult.ErrorMessage, flushResult.Source);
           }
         }
+
+        // Only create DataBlock if we have new content and successful entries
+        if (buffer.Count > 0 && successfulEntries.Count > 0) {
+          newPosition = fs.Position;
+
+          var dataBlock = new DataBlock(
+            FileId: request.FileId,
+            VolumeSerial: request.VolumeSerial,
+            FilePath: request.FilePath,
+            EndPosition: newPosition,
+            LastWriteTime: new DateTime(request.LastWriteTimeUtc, DateTimeKind.Utc),
+            Entries: successfulEntries
+          );
+
+          _logger.LogDebug("Created DataBlock for {FilePath}: {EntryCount} entries, position {Position}",
+            request.FilePath, successfulEntries.Count, newPosition);
+
+          return dataBlock;
+        }
+
+        _logger.LogTrace("No new content or entries for {FilePath}", request.FilePath);
+        return null;
       } catch (Exception ex) {
         _logger.LogError(ex, "Error reading file {FilePath}", request.FilePath);
       }
+
+      return null;
     }
 
     /// <summary>

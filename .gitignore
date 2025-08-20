@@ -110,3 +110,4 @@ Thumbs.db
 /logs
 /sample-logs/*.txt
 /bak
+/implementation_plan.md

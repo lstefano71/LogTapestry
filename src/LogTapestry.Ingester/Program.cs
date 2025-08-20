@@ -77,25 +77,32 @@ public class Program
         .ValidateDataAnnotations();
     builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<PluginSettings>>().Value);
 
-    builder.Services.AddSingleton<IStateProvider>(_ => new SqliteStateProvider(dbPath));
+    // Register state providers
+    builder.Services.AddSingleton<SqliteStateProvider>(_ => new SqliteStateProvider(dbPath));
+    builder.Services.AddSingleton<IStateProvider>(sp => sp.GetRequiredService<SqliteStateProvider>());
+    builder.Services.AddSingleton<LiveStateService>();
+
+    // Register directory monitor
     builder.Services.AddSingleton<DirectoryMonitor>(sp => new DirectoryMonitor(
       sp.GetRequiredService<ILogger<DirectoryMonitor>>(),
       sp.GetRequiredService<IOptions<IngesterSettings>>(),
       sp.GetRequiredService<IStateProvider>()
     ));
-    builder.Services.AddSingleton<DataSink>(sp => new DataSink(
-      sp.GetRequiredService<ILogger<DataSink>>(),
-      sp.GetRequiredService<IStateProvider>()
-    ));
+
+    // Register checkpointing data sink
+    builder.Services.AddSingleton<CheckpointDataSink>();
 
     // Register hosted services
     builder.Services.AddHostedService<IngesterService>();
     builder.Services.AddHostedService<MonitoringService>();
+    builder.Services.AddHostedService<LiveStateService>();
+    builder.Services.AddHostedService<StateWriterService>();
+    builder.Services.AddSingleton<StateWriterService>();
 
     // Enable Windows Service
     builder.Services.AddWindowsService(options => options.ServiceName = "LogTapestry Ingester");
 
-    builder.Services.AddSingleton<StateWriterService>();
+    // Register other services
     builder.Services.AddSingleton<FileReader>();
 
     var host = builder.Build();

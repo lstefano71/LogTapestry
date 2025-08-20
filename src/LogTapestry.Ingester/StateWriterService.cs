@@ -1,95 +1,65 @@
-using LogTapestry.Core;
-
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-
-using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
 {
   public class StateWriterService : IHostedService
   {
     private readonly ILogger<StateWriterService> _logger;
-    private readonly IStateProvider _stateProvider;
-    private readonly IngesterSettings _settings;
-    private readonly Channel<PositionUpdate> _updateChannel;
-    private Task? _processingTask;
+    private readonly CheckpointDataSink _checkpointDataSink;
+    private readonly LiveStateService _liveStateService;
+    private Task? _checkpointProcessingTask;
     private CancellationTokenSource? _cts;
-    private readonly PeriodicTimer _batchTimer;
 
     public StateWriterService(
       ILogger<StateWriterService> logger,
-      IStateProvider stateProvider,
-      Microsoft.Extensions.Options.IOptions<IngesterSettings> options)
+      CheckpointDataSink checkpointDataSink,
+      LiveStateService liveStateService)
     {
       _logger = logger;
-      _stateProvider = stateProvider;
-      _settings = options.Value;
-      _updateChannel = Channel.CreateUnbounded<PositionUpdate>();
-      _batchTimer = new PeriodicTimer(TimeSpan.FromSeconds(_settings.StateWriterIntervalSeconds));
+      _checkpointDataSink = checkpointDataSink;
+      _liveStateService = liveStateService;
     }
-
-    public ChannelWriter<PositionUpdate> Writer => _updateChannel.Writer;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-      _logger.LogInformation("StateWriterService starting with batch size {BatchSize} and interval {Interval}s",
-        _settings.StateWriterBatchSize, _settings.StateWriterIntervalSeconds);
+      _logger.LogInformation("StateWriterService starting - monitoring checkpoint updates");
 
       _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-      _processingTask = Task.Run(async () => await StartPipeline(_cts.Token), cancellationToken);
+      _checkpointProcessingTask = Task.Run(() => ProcessCheckpointUpdatesAsync(_cts.Token), cancellationToken);
 
       return Task.CompletedTask;
     }
 
-    private async Task StartPipeline(CancellationToken token)
+    /// <summary>
+    /// Process checkpoint updates from the CheckpointDataSink.
+    /// In the checkpointing architecture, this is mainly for monitoring and logging.
+    /// The actual state updates are handled by LiveStateService internally.
+    /// </summary>
+    private async Task ProcessCheckpointUpdatesAsync(CancellationToken token)
     {
       try {
-        var batch = new List<PositionUpdate>();
-
-        while (await _batchTimer.WaitForNextTickAsync(token)) {
+        await foreach (var checkpointUpdate in _checkpointDataSink.CheckpointReader.ReadAllAsync(token)) {
           try {
-            // Drain all available updates into the batch
-            while (_updateChannel.Reader.TryRead(out var update)) {
-              batch.Add(update);
+            _logger.LogDebug("Checkpoint processed for {FilePath}: position {Position} at {CheckpointTime}",
+              checkpointUpdate.FilePath,
+              checkpointUpdate.Position,
+              checkpointUpdate.CheckpointTime);
 
-              // If batch is full, write it immediately
-              if (batch.Count >= _settings.StateWriterBatchSize) {
-                await WriteBatch(batch);
-                batch.Clear();
-              }
-            }
-
-            // Write remaining batch items
-            if (batch.Count > 0) {
-              await WriteBatch(batch);
-              batch.Clear();
-            }
+            // The LiveStateService has already handled the actual state update
+            // This service now serves as a monitoring/logging component for checkpoints
           } catch (Exception ex) {
-            _logger.LogError(ex, "Error in StateWriterService batch processing iteration");
+            _logger.LogError(ex, "Error processing checkpoint update for {FilePath}",
+              checkpointUpdate.FilePath);
           }
         }
       } catch (OperationCanceledException) {
-        _logger.LogInformation("StateWriterService pipeline cancellation requested");
-      }
-
-      _logger.LogInformation("StateWriterService pipeline has shut down");
-    }
-
-    private async Task WriteBatch(List<PositionUpdate> batch)
-    {
-      if (batch.Count == 0) return;
-
-      try {
-        // Use the new batch update method
-        await _stateProvider.UpdateTrackedFilesBatchAsync(batch.ToArray());
-
-        _logger.LogDebug("Wrote batch of {Count} position updates", batch.Count);
+        _logger.LogInformation("Checkpoint processing cancelled");
       } catch (Exception ex) {
-        _logger.LogError(ex, "Failed to write batch of {Count} position updates", batch.Count);
-        // Continue processing - don't let one batch failure stop the service
+        _logger.LogError(ex, "Error in checkpoint processing");
       }
+
+      _logger.LogInformation("Checkpoint processing has shut down");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -100,21 +70,11 @@ namespace LogTapestry.Ingester
         _cts.Cancel();
       }
 
-      // Process any remaining items in the channel
-      var remainingBatch = new List<PositionUpdate>();
-      while (_updateChannel.Reader.TryRead(out var update)) {
-        remainingBatch.Add(update);
+      if (_checkpointProcessingTask != null) {
+        await _checkpointProcessingTask;
       }
 
-      if (remainingBatch.Count > 0) {
-        await WriteBatch(remainingBatch);
-      }
-
-      if (_processingTask != null) {
-        await _processingTask;
-      }
-
-      _batchTimer.Dispose();
+      _logger.LogInformation("StateWriterService stopped");
     }
   }
 }
