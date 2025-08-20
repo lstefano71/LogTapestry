@@ -130,7 +130,8 @@ namespace LogTapestry.Ingester
       try {
         await SetupCheckpointingPipelineAsync(token);
       } catch (OperationCanceledException) {
-        _logger.LogInformation("Checkpointing pipeline cancelled");
+        _logger.LogInformation("[{threadid}] Checkpointing pipeline cancelled",
+          Thread.CurrentThread.ManagedThreadId);
       } catch (Exception ex) {
         _logger.LogError(ex, "Error in checkpointing pipeline");
       }

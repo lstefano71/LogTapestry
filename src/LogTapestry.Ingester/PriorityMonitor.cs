@@ -46,23 +46,28 @@ namespace LogTapestry.Ingester
       bool isFastChannel,
       CancellationToken token)
     {
-      await foreach (var fileEvent in channel.ReadAllAsync(token)) {
-        var key = (fileEvent.FileId, fileEvent.VolumeSerial);
+      try {
+        await foreach (var fileEvent in channel.ReadAllAsync(token)) {
+          var key = (fileEvent.FileId, fileEvent.VolumeSerial);
 
-        // Skip if we've already processed this file from a fast channel
-        if (!isFastChannel && _seenEvents.Contains(key)) {
-          _logger.LogDebug("Skipping duplicate event for file {FilePath} (already processed from fast channel)",
-            fileEvent.FilePath);
-          continue;
+          // Skip if we've already processed this file from a fast channel
+          if (!isFastChannel && _seenEvents.Contains(key)) {
+            _logger.LogDebug("Skipping duplicate event for file {FilePath} (already processed from fast channel)",
+              fileEvent.FilePath);
+            continue;
+          }
+
+          // Track that we've seen this file
+          _seenEvents.Add(key);
+
+          await _outputChannel.Writer.WriteAsync(fileEvent, token);
+
+          _logger.LogDebug("Processed {ChannelType} event: {Type} {FilePath}",
+            isFastChannel ? "fast" : "slow", fileEvent.Type, fileEvent.FilePath);
         }
-
-        // Track that we've seen this file
-        _seenEvents.Add(key);
-
-        await _outputChannel.Writer.WriteAsync(fileEvent, token);
-
-        _logger.LogDebug("Processed {ChannelType} event: {Type} {FilePath}",
-          isFastChannel ? "fast" : "slow", fileEvent.Type, fileEvent.FilePath);
+      } catch (OperationCanceledException) {
+        _logger.LogInformation("Channel processing cancelled for {ChannelType}", isFastChannel ? "fast" : "slow");
+        // Optionally: perform any cleanup here
       }
     }
   }

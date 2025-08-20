@@ -13,7 +13,7 @@ namespace LogTapestry.Ingester
   public class FileReader
   {
     private readonly ILogger<FileReader> _logger;
-    private readonly IStateProvider _stateProvider;
+    private readonly LiveStateService _liveStateService;
     private readonly List<PluginSettings> _pluginSettings;
     private readonly Matcher _matcher;
 
@@ -28,12 +28,12 @@ namespace LogTapestry.Ingester
 
     public FileReader(
       ILogger<FileReader> logger,
-      IStateProvider stateProvider,
+      LiveStateService liveStateService,
       IOptions<LogTapestrySettings> settings,
       ILoggerFactory loggerFactory)
     {
       _logger = logger;
-      _stateProvider = stateProvider;
+      _liveStateService = liveStateService;
       _pluginSettings = settings.Value.Plugins;
       _loggerFactory = loggerFactory;
 
@@ -183,8 +183,8 @@ namespace LogTapestry.Ingester
 
     private async Task<long?> GetTrackedPositionAsync(FileCheckRequest request)
     {
-      var trackedFile = await _stateProvider.GetTrackedFileAsync(request.FileId, request.VolumeSerial);
-      return trackedFile?.Position;
+      // Use LiveStateService for fast in-memory position lookup
+      return await _liveStateService.GetPosition(request.FileId, request.VolumeSerial);
     }
   }
 }

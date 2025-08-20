@@ -132,11 +132,16 @@ public class CheckpointDataSink : IDataSink
     var tempFilePath = Path.Combine(partitionPath, $"part-{Guid.NewGuid()}.parquet_tmp");
     var finalFilePath = Path.ChangeExtension(tempFilePath, ".parquet");
 
+    long bytesWritten = 0;
     try {
-      using var stream = File.Create(tempFilePath);
-      await WriteBatchAsync(batch, stream, finalFilePath, partitionPath);
+      using (var stream = File.Create(tempFilePath)) {
+        await WriteBatchAsync(batch, stream, finalFilePath, partitionPath);
+        bytesWritten = stream.Length;
+      }
+
+      // Stream is now closed, safe to move the file
       File.Move(tempFilePath, finalFilePath);
-      Metrics.BytesProcessed += stream.Length;
+      Metrics.BytesProcessed += bytesWritten;
     } catch {
       // Clean up temp file on error
       if (File.Exists(tempFilePath)) {
