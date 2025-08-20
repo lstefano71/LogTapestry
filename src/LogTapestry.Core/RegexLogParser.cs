@@ -24,6 +24,18 @@ namespace LogTapestry.Core
 
     public IEnumerable<ParsingResult> Parse(string[] lines)
     {
+      // Single-line mode: StartOfEntryRegex is not set or empty
+      if (_settings.Config?.StartOfEntryRegex == null || string.IsNullOrWhiteSpace(_settings.Config.StartOfEntryRegex)) {
+        foreach (var line in lines) {
+          if (!string.IsNullOrWhiteSpace(line)) {
+            var (entry, singleLineParseFailed) = StartNewEntry(line);
+            yield return FinalizeEntry(new StringBuilder(line), entry, singleLineParseFailed);
+          }
+        }
+        yield break;
+      }
+
+      // Multi-line mode: current logic
       StringBuilder multiLineBuffer = new();
       LogEntry? inProgressEntry = null;
       bool entryParseFailed = false;
@@ -40,7 +52,10 @@ namespace LogTapestry.Core
           multiLineBuffer.AppendLine(line);
         }
       }
-      // Do not finalize here; Flush will handle any remaining entry
+      // Finalize and emit the last entry if present
+      if (inProgressEntry != null) {
+        yield return FinalizeEntry(multiLineBuffer, inProgressEntry, entryParseFailed);
+      }
     }
 
     public ParsingResult? Flush()

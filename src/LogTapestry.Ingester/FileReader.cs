@@ -127,6 +127,18 @@ namespace LogTapestry.Ingester
               result.ErrorMessage, result.Source);
           }
         }
+
+        // Flush the parser to emit any buffered result (e.g., last line/event)
+        var flushResult = parser.Flush();
+        if (flushResult != null) {
+          await parsingChannel.WriteAsync(flushResult, token);
+          if (flushResult.IsSuccess && flushResult.Entry != null) {
+            _logger.LogTrace("Sent flushed parsed log entry from {FilePath} to parsing pipeline", request.FilePath);
+          } else {
+            _logger.LogWarning("Log parsing failed on flush: {ErrorMessage}. Source: {Source}",
+              flushResult.ErrorMessage, flushResult.Source);
+          }
+        }
       } catch (Exception ex) {
         _logger.LogError(ex, "Error reading file {FilePath}", request.FilePath);
       }
