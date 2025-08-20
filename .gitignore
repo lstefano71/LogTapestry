@@ -111,3 +111,4 @@ Thumbs.db
 /sample-logs/*.txt
 /bak
 /implementation_plan.md
+/sample-logs/test.log.sss

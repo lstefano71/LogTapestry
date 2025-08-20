@@ -48,7 +48,7 @@ namespace LogTapestry.Ingester
       _fileReader = fileReader;
 
       // Initialize checkpointing pipeline channels
-      _dataBlockChannel = Channel.CreateBounded<DataBlock>(10);
+      _dataBlockChannel = Channel.CreateBounded<DataBlock>(2);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -95,9 +95,11 @@ namespace LogTapestry.Ingester
     /// </summary>
     private async Task SetupCheckpointingPipelineAsync(CancellationToken token)
     {
+      FileEvent? lastEvent = null;
       // Pipeline: FileEvent -> FileCheckRequest -> DataBlock -> CheckpointDataSink
-      await foreach (var fileEvent in _directoryMonitor.FileEvents.ReadAllAsync(token)) {
-        try {
+      try {
+        await foreach (var fileEvent in _directoryMonitor.FileEvents.ReadAllAsync(token)) {
+          lastEvent = fileEvent;
           // Transform FileEvent to FileCheckRequest
           var fileRequest = new FileCheckRequest {
             FileId = fileEvent.FileId,
@@ -112,15 +114,18 @@ namespace LogTapestry.Ingester
 
             if (dataBlock != null) {
               // Send DataBlock to checkpointing data sink
+              _logger.LogDebug("Sending DataBlock for {FilePath}: {EntryCount} entries, {Position}...",
+                fileEvent.FilePath, dataBlock.Entries.Count, dataBlock.EndPosition);
               await _dataBlockChannel.Writer.WriteAsync(dataBlock, token);
-              _logger.LogDebug("Sent DataBlock for {FilePath}: {EntryCount} entries",
-                fileEvent.FilePath, dataBlock.Entries.Count);
+              _logger.LogDebug("Sent DataBlock for {FilePath}: {EntryCount} entries, {Position}",
+                fileEvent.FilePath, dataBlock.Entries.Count, dataBlock.EndPosition);
             }
           }
-        } catch (Exception ex) {
-          _logger.LogError(ex, "Error processing file event for {FilePath}", fileEvent.FilePath);
         }
+      } catch (Exception ex) {
+        _logger.LogError(ex, "Error processing file event for {FilePath}", lastEvent?.FilePath);
       }
+
     }
 
     /// <summary>
