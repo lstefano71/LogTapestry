@@ -124,6 +124,7 @@ namespace LogTapestry.Ingester
           return fileRequest;
         })
         .Batch(_settings.Ingester.StateWriterBatchSize)  // Batch file requests
+        .WithTimeout(_settings.Ingester.PollingIntervalMs)
         .Transform(async batch => {
           // Process batch of position updates
           var positionUpdates = new List<PositionUpdate>();
