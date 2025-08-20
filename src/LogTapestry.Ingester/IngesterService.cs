@@ -108,13 +108,14 @@ namespace LogTapestry.Ingester
           };
 
           // Process the file and get DataBlock
-          var dataBlock = await _fileReader.ReadAndCreateDataBlockAsync(fileRequest, token);
+          await foreach (var dataBlock in _fileReader.ReadAndCreateDataBlocksAsync(fileRequest, token)) {
 
-          if (dataBlock != null) {
-            // Send DataBlock to checkpointing data sink
-            await _dataBlockChannel.Writer.WriteAsync(dataBlock, token);
-            _logger.LogDebug("Sent DataBlock for {FilePath}: {EntryCount} entries",
-              fileEvent.FilePath, dataBlock.Entries.Count);
+            if (dataBlock != null) {
+              // Send DataBlock to checkpointing data sink
+              await _dataBlockChannel.Writer.WriteAsync(dataBlock, token);
+              _logger.LogDebug("Sent DataBlock for {FilePath}: {EntryCount} entries",
+                fileEvent.FilePath, dataBlock.Entries.Count);
+            }
           }
         } catch (Exception ex) {
           _logger.LogError(ex, "Error processing file event for {FilePath}", fileEvent.FilePath);

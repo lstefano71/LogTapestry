@@ -18,6 +18,7 @@ public class IngesterSettings
   public string LogLevel { get; set; } = "Information"; // Added log level config
 
   public int BatchSize { get; set; } = 50000;
+  public int MaxEntriesPerDataBlock { get; set; } = 50000;
   public int PollingIntervalMs { get; set; } = 1000;
   public string MonitoringUrl { get; set; } = "";
 
