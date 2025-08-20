@@ -5,27 +5,19 @@ using System.Text.RegularExpressions;
 
 namespace LogTapestry.Core
 {
-  public class RegexLogParser : ILogParser
+  public class RegexLogParser(PluginSettings settings, string sourceFile, ILogger? logger = null) : ILogParser
   {
-    private readonly PluginSettings _settings;
-    private readonly string _sourceFile;
-    private readonly ILogger? _logger;
-    private readonly Regex _startOfEntryRegex;
+    private readonly PluginSettings _settings = settings;
+    private readonly string _sourceFile = sourceFile;
+    private readonly ILogger? _logger = logger;
+    private readonly Regex _startOfEntryRegex = settings.Config?.StartOfEntryRegex != null
+          ? new Regex(settings.Config.StartOfEntryRegex, RegexOptions.Compiled)
+          : new Regex("^$", RegexOptions.Compiled);
 
     // State for multi-line parsing
-    private StringBuilder _multiLineBuffer = new();
+    private readonly StringBuilder _multiLineBuffer = new();
     private LogEntry? _inProgressEntry = null;
-    private bool _entryParseFailed = false;
-
-    public RegexLogParser(PluginSettings settings, string sourceFile, ILogger? logger = null)
-    {
-      _settings = settings;
-      _sourceFile = sourceFile;
-      _logger = logger;
-      _startOfEntryRegex = settings.Config?.StartOfEntryRegex != null
-          ? new Regex(settings.Config.StartOfEntryRegex, RegexOptions.Compiled)
-          : new Regex("^$", RegexOptions.Compiled); // Default: match nothing
-    }
+    private bool _entryParseFailed;
 
     public IEnumerable<ParsingResult> Parse(IList<string> lines)
     {
@@ -78,7 +70,7 @@ namespace LogTapestry.Core
       var level = "UNKNOWN";
       var message = line;
       var fields = new Dictionary<string, object>();
-      bool entryParseFailed = false;
+      bool entryParseFailed;
 
       if (!string.IsNullOrEmpty(_settings.Config.TimestampRegex)) {
         var match = Regex.Match(line, _settings.Config.TimestampRegex);
@@ -89,13 +81,13 @@ namespace LogTapestry.Core
             } else {
               timestamp = parsedTimestamp;
             }
-            return (new LogEntry(timestamp, level, message, _sourceFile, 0, fields, Array.Empty<byte>()), false);
+            return (new LogEntry(timestamp, level, message, _sourceFile, 0, fields, []), false);
           }
         }
       }
       _logger?.LogWarning("Plugin: {name}, failed to parse timestamp for line: {Line}", _settings.Name, line);
       entryParseFailed = true;
-      return (new LogEntry(timestamp, level, message, _sourceFile, 0, fields, Array.Empty<byte>()), entryParseFailed);
+      return (new LogEntry(timestamp, level, message, _sourceFile, 0, fields, []), entryParseFailed);
     }
 
     private ParsingResult FinalizeEntry(StringBuilder multiLineBuffer, LogEntry inProgressEntry, bool entryParseFailed)

@@ -32,7 +32,7 @@ class Program
       queryArgument
     };
 
-    rootCommand.SetAction(async (ParseResult parseResult) => {
+    rootCommand.SetAction(async parseResult => {
       var databasePath = parseResult.GetValue(databasePathOption);
       var dataPath = parseResult.GetValue(dataPathOption);
       var output = parseResult.GetValue(outputOption);

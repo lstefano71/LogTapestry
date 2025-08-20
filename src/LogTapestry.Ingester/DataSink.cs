@@ -8,7 +8,7 @@ using Parquet.Schema;
 
 namespace LogTapestry.Ingester;
 
-public class DataSink
+public class DataSink(ILogger<DataSink> logger, IStateProvider? stateProvider = null)
 {
   // Metrics instrumentation
   public static class Metrics
@@ -39,14 +39,8 @@ public class DataSink
     )
   );
 
-  private readonly ILogger<DataSink> _logger;
-  private readonly IStateProvider? _stateProvider;
-
-  public DataSink(ILogger<DataSink> logger, IStateProvider? stateProvider = null)
-  {
-    _logger = logger;
-    _stateProvider = stateProvider;
-  }
+  private readonly ILogger<DataSink> _logger = logger;
+  private readonly IStateProvider? _stateProvider = stateProvider;
 
   private async Task PopulateFieldSchemaAsync(LogEntry[] batch)
   {
@@ -205,26 +199,23 @@ public class DataSink
   // STEP 3: The New Class Hierarchy for Column Builders
   // ====================================================================
 
-  private abstract class ColumnBuilder
+  private abstract class ColumnBuilder(DataField field)
   {
     protected const int MaxDefLevel = 4;
     protected const int StructExistsDefLevel = 3;
     protected const int ListExistsDefLevel = 1;
 
-    protected readonly DataField Field;
+    protected readonly DataField Field = field;
     protected readonly List<int> DefLevels = [];
-
-    protected ColumnBuilder(DataField field) { Field = field; }
 
     public void AddEmptyListEntry() => DefLevels.Add(ListExistsDefLevel);
 
     public abstract DataColumn ToDataColumn(int[] repetitionLevels);
   }
 
-  private class ValueTypeColumnBuilder<T> : ColumnBuilder where T : struct
+  private class ValueTypeColumnBuilder<T>(DataField field) : ColumnBuilder(field) where T : struct
   {
     private readonly List<T> _values = [];
-    public ValueTypeColumnBuilder(DataField field) : base(field) { }
 
     public void Add(T? value)
     {
@@ -240,10 +231,9 @@ public class DataSink
       new(Field, _values.ToArray(), [.. DefLevels], repetitionLevels);
   }
 
-  private class ReferenceTypeColumnBuilder<T> : ColumnBuilder where T : class
+  private class ReferenceTypeColumnBuilder<T>(DataField field) : ColumnBuilder(field) where T : class
   {
     private readonly List<T> _values = [];
-    public ReferenceTypeColumnBuilder(DataField field) : base(field) { }
 
     public void Add(T? value)
     {

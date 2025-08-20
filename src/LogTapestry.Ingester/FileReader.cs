@@ -21,7 +21,7 @@ namespace LogTapestry.Ingester
 
     // Parser type mapping: maps plugin.Type to parser factory
     private readonly ILoggerFactory _loggerFactory;
-    private static Func<PluginSettings, string, ILoggerFactory, ILogParser> RegexParserFactory =
+    private static readonly Func<PluginSettings, string, ILoggerFactory, ILogParser> RegexParserFactory =
       (settings, filePath, loggerFactory) => new RegexLogParser(settings, filePath, loggerFactory.CreateLogger<RegexLogParser>());
     private static readonly IReadOnlyDictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>> ParserFactories =
       new Dictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>>(StringComparer.OrdinalIgnoreCase) {
@@ -42,7 +42,7 @@ namespace LogTapestry.Ingester
       _pluginSettings = settings.Value.Plugins;
       _loggerFactory = loggerFactory;
       // Precompute matchers for each plugin
-      _pluginMatchers = new List<(PluginSettings, Matcher)>();
+      _pluginMatchers = [];
       foreach (var plugin in _pluginSettings) {
         var matcher = new Matcher();
         matcher.AddIncludePatterns(plugin.IncludePatterns);
@@ -123,6 +123,15 @@ namespace LogTapestry.Ingester
             request.FilePath, successfulEntries.Count, currentPosition);
 
           yield return dataBlock;
+          // Update in-memory position cache only
+          await _liveStateService.UpdatePosition(
+            request.FileId,
+            request.VolumeSerial,
+            currentPosition,
+            request.FilePath,
+            new DateTime(request.LastWriteTimeUtc, DateTimeKind.Utc),
+            PositionUpdateMode.InMemoryOnly
+          );
           successfulEntries.Clear();
         }
       }
@@ -154,6 +163,15 @@ namespace LogTapestry.Ingester
           request.FilePath, successfulEntries.Count, currentPosition);
 
         yield return dataBlock;
+        // Update in-memory position cache only for final DataBlock
+        await _liveStateService.UpdatePosition(
+          request.FileId,
+          request.VolumeSerial,
+          currentPosition,
+          request.FilePath,
+          new DateTime(request.LastWriteTimeUtc, DateTimeKind.Utc),
+          PositionUpdateMode.InMemoryOnly
+        );
       }
 
       if (emittedEntries == 0) {
@@ -163,7 +181,7 @@ namespace LogTapestry.Ingester
     /// <summary>
     /// Read the next block of lines from the file stream.
     /// </summary>
-    private async IAsyncEnumerable<(IList<string>, long)> ReadBlockOfLines(FileStream fs, int maximumNumberOfLines,
+    private static async IAsyncEnumerable<(IList<string>, long)> ReadBlockOfLines(FileStream fs, int maximumNumberOfLines,
       [EnumeratorCancellation] CancellationToken token)
     {
       // read at most maximumNumberOfLines lines from the file stream
@@ -186,7 +204,7 @@ namespace LogTapestry.Ingester
     /// <summary>
     /// Checks if a file has been rotated by comparing file IDs.
     /// </summary>
-    public bool IsFileRotated(string filePath, ulong originalFileId)
+    public static bool IsFileRotated(string filePath, ulong originalFileId)
     {
       var currentId = NtfsUtils.GetFileIdentifier(filePath);
       return currentId == null || currentId.FileId != originalFileId;
@@ -195,7 +213,7 @@ namespace LogTapestry.Ingester
     /// <summary>
     /// Gets the last write time for a file without keeping it open.
     /// </summary>
-    public long GetLastWriteTimeUtc(string filePath)
+    public static long GetLastWriteTimeUtc(string filePath)
     {
       return File.GetLastWriteTimeUtc(filePath).Ticks;
     }

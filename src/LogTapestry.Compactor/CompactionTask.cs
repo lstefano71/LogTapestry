@@ -6,16 +6,10 @@ using Parquet.Schema;
 
 namespace LogTapestry.Compactor
 {
-  public class CompactionTask
+  public class CompactionTask(string dataPath, string compactOlderThan)
   {
-    private readonly string _dataPath;
-    private readonly string _compactOlderThan;
-
-    public CompactionTask(string dataPath, string compactOlderThan)
-    {
-      _dataPath = dataPath;
-      _compactOlderThan = compactOlderThan;
-    }
+    private readonly string _dataPath = dataPath;
+    private readonly string _compactOlderThan = compactOlderThan;
 
     public async Task RunAsync()
     {
@@ -58,7 +52,7 @@ namespace LogTapestry.Compactor
       return candidates;
     }
 
-    public async Task ExecuteCompaction(string partitionPath)
+    public static async Task ExecuteCompaction(string partitionPath)
     {
       var landingPath = Path.Combine(partitionPath, "landing");
       var markerPath = Path.Combine(partitionPath, "_COMPACTION_COMPLETE");
@@ -121,7 +115,7 @@ namespace LogTapestry.Compactor
       await Task.CompletedTask;
     }
 
-    private async Task WriteRowGroupAsync(ParquetWriter parquetWriter, ParquetSchema schema, List<object[]> rows)
+    private static async Task WriteRowGroupAsync(ParquetWriter parquetWriter, ParquetSchema schema, List<object[]> rows)
     {
       using var groupWriter = parquetWriter.CreateRowGroup();
       foreach (var colIdx in Enumerable.Range(0, schema.DataFields.Length)) {
@@ -130,7 +124,7 @@ namespace LogTapestry.Compactor
         await groupWriter.WriteColumnAsync(column);
       }
     }
-    private TimeSpan ParseTimeSpan(string input)
+    private static TimeSpan ParseTimeSpan(string input)
     {
       // Simple parser: "1h", "2d", "30m"
       if (input.EndsWith('h'))
@@ -142,7 +136,7 @@ namespace LogTapestry.Compactor
       throw new ArgumentException("Invalid timespan format. Use '1h', '2d', or '30m'.");
     }
 
-    private DataField CreateDataField(string name, Type type)
+    private static DataField CreateDataField(string name, Type type)
     {
       // Map .NET types to Parquet.Data.DataField<T>
       if (type == typeof(string)) return new DataField<string>(name);
@@ -152,12 +146,12 @@ namespace LogTapestry.Compactor
       if (type == typeof(float)) return new DataField<float>(name);
       if (type == typeof(bool)) return new DataField<bool>(name);
       if (type == typeof(DateTime)) return new DataField<DateTime>(name);
-      if (type == typeof(byte[]) || name.ToLower() == "ulid") return new DataField<byte[]>(name);
+      if (type == typeof(byte[]) || name.Equals("ulid", StringComparison.CurrentCultureIgnoreCase)) return new DataField<byte[]>(name);
       // Fallback to string for unknown types
       return new DataField<string>(name);
     }
 
-    private long EstimateRowSize(object[] row)
+    private static long EstimateRowSize(object[] row)
     {
       long size = 0;
       foreach (var val in row) {

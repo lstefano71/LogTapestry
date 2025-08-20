@@ -10,19 +10,11 @@ using static Microsoft.AspNetCore.Http.Results;
 
 namespace LogTapestry.Ingester
 {
-  public class MonitoringService : IHostedService
+  public class MonitoringService(ILogger<MonitoringService> logger, IStateProvider stateProvider, Microsoft.Extensions.Options.IOptions<IngesterSettings> options) : IHostedService
   {
-    private readonly ILogger<MonitoringService> _logger;
-    private readonly IStateProvider _stateProvider;
-    private readonly IngesterSettings _settings;
-
-    public MonitoringService(ILogger<MonitoringService> logger, IStateProvider stateProvider, Microsoft.Extensions.Options.IOptions<IngesterSettings> options)
-    {
-      _logger = logger;
-      _stateProvider = stateProvider;
-      _settings = options.Value;
-    }
-
+    private readonly ILogger<MonitoringService> _logger = logger;
+    private readonly IStateProvider _stateProvider = stateProvider;
+    private readonly IngesterSettings _settings = options.Value;
     private WebApplication? _webApp;
 
     public async Task StartAsync(CancellationToken cancellationToken)

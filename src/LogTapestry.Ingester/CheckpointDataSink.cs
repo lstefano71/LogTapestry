@@ -17,7 +17,10 @@ public record FieldElement(string Key, FieldValue Value);
 /// DataSink that coordinates data persistence with state updates.
 /// This is the point of commitment for both data and state - implementing checkpointing.
 /// </summary>
-public class CheckpointDataSink : IDataSink
+public class CheckpointDataSink(
+    ILogger<CheckpointDataSink> logger,
+    IStateProvider stateProvider,
+    LiveStateService liveStateService) : IDataSink
 {
   // Metrics instrumentation
   public static class Metrics
@@ -27,12 +30,12 @@ public class CheckpointDataSink : IDataSink
     public static long CheckpointsCompleted = 0;
   }
 
-  private readonly ILogger<CheckpointDataSink> _logger;
-  private readonly IStateProvider _stateProvider;
-  private readonly LiveStateService _liveStateService;
+  private readonly ILogger<CheckpointDataSink> _logger = logger;
+  private readonly IStateProvider _stateProvider = stateProvider;
+  private readonly LiveStateService _liveStateService = liveStateService;
 
   // Channel for emitting checkpoint position updates after successful data persistence
-  private readonly Channel<CheckpointPositionUpdate> _checkpointChannel;
+  private readonly Channel<CheckpointPositionUpdate> _checkpointChannel = Channel.CreateBounded<CheckpointPositionUpdate>(10);
 
   // Parquet schema - same as original DataSink
   private static readonly ParquetSchema Schema = new(
@@ -53,17 +56,6 @@ public class CheckpointDataSink : IDataSink
       )
   );
 
-  public CheckpointDataSink(
-      ILogger<CheckpointDataSink> logger,
-      IStateProvider stateProvider,
-      LiveStateService liveStateService)
-  {
-    _logger = logger;
-    _stateProvider = stateProvider;
-    _liveStateService = liveStateService;
-    _checkpointChannel = Channel.CreateBounded<CheckpointPositionUpdate>(10);
-  }
-
   public ChannelReader<CheckpointPositionUpdate> CheckpointReader => _checkpointChannel.Reader;
   ChannelWriter<CheckpointPositionUpdate> CheckpointWriter => _checkpointChannel.Writer;
 
@@ -71,12 +63,12 @@ public class CheckpointDataSink : IDataSink
   /// Coordinated batch write and checkpoint update.
   /// This is the atomic operation that ensures data and state consistency.
   /// </summary>
-  public async Task WriteBatchAndCheckpointStateAsync(DataBlock[] batch, CancellationToken token = default)
+  public async Task WriteBatchAndCheckpointStateAsync(IList<DataBlock> batch, CancellationToken token = default)
   {
-    if (batch.Length == 0) return;
+    if (batch.Count == 0) return;
 
     try {
-      _logger.LogDebug("Writing batch of {Count} data blocks with checkpointing", batch.Length);
+      _logger.LogDebug("Writing batch of {Count} data blocks with checkpointing", batch.Count);
 
       // Group entries by partition (same logic as original)
       var partitionGroups = batch
@@ -110,7 +102,8 @@ public class CheckpointDataSink : IDataSink
               dataBlock.VolumeSerial,
               dataBlock.EndPosition,
               dataBlock.FilePath,
-              dataBlock.LastWriteTime
+              dataBlock.LastWriteTime,
+              PositionUpdateMode.InMemoryAndPersist
           );
 
           Metrics.CheckpointsCompleted++;
@@ -120,9 +113,9 @@ public class CheckpointDataSink : IDataSink
       }
 
       Metrics.LogEntriesIngested += batch.Sum(db => db.Entries.Count);
-      _logger.LogInformation("Successfully wrote batch of {Count} data blocks with checkpointing", batch.Length);
+      _logger.LogInformation("Successfully wrote batch of {Count} data blocks with checkpointing", batch.Count);
     } catch (Exception ex) {
-      _logger.LogError(ex, "Failed to write batch of {Count} data blocks with checkpointing", batch.Length);
+      _logger.LogError(ex, "Failed to write batch of {Count} data blocks with checkpointing", batch.Count);
       throw; // Re-throw to let caller handle the error
     }
   }
@@ -152,7 +145,7 @@ public class CheckpointDataSink : IDataSink
     }
   }
 
-  private string GetPartitionKey(LogEntry entry)
+  private static string GetPartitionKey(LogEntry entry)
   {
     var timestamp = entry.Timestamp.ToUniversalTime();
     return Path.Combine(
@@ -305,26 +298,23 @@ public class CheckpointDataSink : IDataSink
     }
   }
 
-  private abstract class ColumnBuilder
+  private abstract class ColumnBuilder(DataField field)
   {
     protected const int MaxDefLevel = 4;
     protected const int StructExistsDefLevel = 3;
     protected const int ListExistsDefLevel = 1;
 
-    protected readonly DataField Field;
+    protected readonly DataField Field = field;
     protected readonly List<int> DefLevels = [];
-
-    protected ColumnBuilder(DataField field) { Field = field; }
 
     public void AddEmptyListEntry() => DefLevels.Add(ListExistsDefLevel);
 
     public abstract DataColumn ToDataColumn(int[] repetitionLevels);
   }
 
-  private class ValueTypeColumnBuilder<T> : ColumnBuilder where T : struct
+  private class ValueTypeColumnBuilder<T>(DataField field) : ColumnBuilder(field) where T : struct
   {
     private readonly List<T> _values = [];
-    public ValueTypeColumnBuilder(DataField field) : base(field) { }
 
     public void Add(T? value)
     {
@@ -340,10 +330,9 @@ public class CheckpointDataSink : IDataSink
         new(Field, _values.ToArray(), [.. DefLevels], repetitionLevels);
   }
 
-  private class ReferenceTypeColumnBuilder<T> : ColumnBuilder where T : class
+  private class ReferenceTypeColumnBuilder<T>(DataField field) : ColumnBuilder(field) where T : class
   {
     private readonly List<T> _values = [];
-    public ReferenceTypeColumnBuilder(DataField field) : base(field) { }
 
     public void Add(T? value)
     {

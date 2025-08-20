@@ -83,9 +83,34 @@ public class Program
     builder.Services.AddSingleton<IStateProvider>(sp => sp.GetRequiredService<SqliteStateProvider>());
     builder.Services.AddSingleton<LiveStateService>();
 
-    // Register PriorityMonitor, InitialScanProducer, and WatcherProducer for DI
+    // Register consistent hashing router
+    builder.Services.AddSingleton<ConsistentHashRouter>(sp => {
+      var settings = sp.GetRequiredService<IOptions<IngesterSettings>>().Value;
+      var logger = sp.GetRequiredService<ILogger<ConsistentHashRouter>>();
+      return new ConsistentHashRouter(logger, settings.FileReaderThreadPoolSize);
+    });
+
+    // Register processor channels
+    builder.Services.AddSingleton<List<ProcessorChannel>>(sp => {
+      var settings = sp.GetRequiredService<IOptions<IngesterSettings>>().Value;
+      var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+      var channels = new List<ProcessorChannel>();
+
+      for (int i = 0; i < settings.FileReaderThreadPoolSize; i++) {
+        var logger = loggerFactory.CreateLogger<ProcessorChannel>();
+        channels.Add(new ProcessorChannel(logger, i));
+      }
+
+      return channels;
+    });
+
+    // Register PriorityMonitor with consistent hashing dependencies
     builder.Services.AddSingleton<PriorityMonitor>(sp =>
-        new PriorityMonitor(sp.GetRequiredService<ILogger<PriorityMonitor>>()));
+        new PriorityMonitor(
+          sp.GetRequiredService<ILogger<PriorityMonitor>>(),
+          sp.GetRequiredService<ConsistentHashRouter>(),
+          sp.GetRequiredService<List<ProcessorChannel>>()));
+
     builder.Services.AddSingleton<InitialScanProducer>(sp =>
         new InitialScanProducer(
             sp.GetRequiredService<ILogger<InitialScanProducer>>(),

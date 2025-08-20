@@ -23,7 +23,7 @@ public class IngesterSettings
   public string MonitoringUrl { get; set; } = "";
 
   // New configuration for worker pool architecture
-  public int FileReaderThreadPoolSize { get; set; } = 8;
+  public int FileReaderThreadPoolSize { get; set; } = Environment.ProcessorCount * 2;
   public int StateWriterBatchSize { get; set; } = 1000;
   public int StateWriterIntervalSeconds { get; set; } = 2;
   public int FileSystemWatcherBufferSize { get; set; } = 65536;

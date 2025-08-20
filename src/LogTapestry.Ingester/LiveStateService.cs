@@ -8,31 +8,30 @@ using System.Threading.Channels;
 
 namespace LogTapestry.Ingester;
 
+public enum PositionUpdateMode
+{
+  InMemoryOnly,
+  InMemoryAndPersist
+}
+
 /// <summary>
 /// In-memory source of truth for file positions with SQLite persistence.
 /// Implements checkpointing by ensuring position updates are only committed after data persistence.
 /// </summary>
-public class LiveStateService : IStateProvider, IHostedService
+public class LiveStateService(
+    ILogger<LiveStateService> logger,
+    IStateProvider persistentStateProvider) : IStateProvider, IHostedService
 {
-  private readonly ILogger<LiveStateService> _logger;
-  private readonly IStateProvider _persistentStateProvider;
+  private readonly ILogger<LiveStateService> _logger = logger;
+  private readonly IStateProvider _persistentStateProvider = persistentStateProvider;
 
   // In-memory position cache - the source of truth
   private readonly ConcurrentDictionary<(ulong FileId, long VolumeSerial), TrackedFileInfo> _positionCache = new();
 
   // Channel for queuing position updates to SQLite
-  private readonly Channel<CheckpointPositionUpdate> _checkpointChannel;
+  private readonly Channel<CheckpointPositionUpdate> _checkpointChannel = Channel.CreateUnbounded<CheckpointPositionUpdate>();
   private Task? _persistenceTask;
   private CancellationTokenSource? _cts;
-
-  public LiveStateService(
-      ILogger<LiveStateService> logger,
-      IStateProvider persistentStateProvider)
-  {
-    _logger = logger;
-    _persistentStateProvider = persistentStateProvider;
-    _checkpointChannel = Channel.CreateUnbounded<CheckpointPositionUpdate>();
-  }
 
   /// <summary>
   /// Fast in-memory position lookup - this is the source of truth.
@@ -58,7 +57,7 @@ public class LiveStateService : IStateProvider, IHostedService
   /// This implements the checkpointing principle: memory is source of truth.
   /// Thread-safe to prevent duplicate updates from multiple workers.
   /// </summary>
-  public async Task UpdatePosition(ulong fileId, long volumeSerial, long position, string filePath, DateTime lastWriteTime)
+  public async Task UpdatePosition(ulong fileId, long volumeSerial, long position, string filePath, DateTime lastWriteTime, PositionUpdateMode mode = PositionUpdateMode.InMemoryAndPersist)
   {
     var key = (fileId, volumeSerial);
 
@@ -102,8 +101,12 @@ public class LiveStateService : IStateProvider, IHostedService
           DateTime.UtcNow
       );
 
-      await _checkpointChannel.Writer.WriteAsync(checkpointUpdate, _cts?.Token ?? CancellationToken.None);
-      _logger.LogTrace("Queued checkpoint update for {FilePath}: position {Position}", filePath, position);
+      if (mode == PositionUpdateMode.InMemoryAndPersist) {
+        await _checkpointChannel.Writer.WriteAsync(checkpointUpdate, _cts?.Token ?? CancellationToken.None);
+        _logger.LogTrace("Queued checkpoint update for {FilePath}: position {Position}", filePath, position);
+      } else {
+        _logger.LogTrace("In-memory update for {FilePath}: position {Position}", filePath, position);
+      }
     } else {
       _logger.LogTrace("Skipped duplicate checkpoint update for {FilePath}: position {Position}", filePath, position);
     }
@@ -183,7 +186,7 @@ public class LiveStateService : IStateProvider, IHostedService
 
   public async Task UpdateTrackedFileAsync(TrackedFileInfo info)
   {
-    await UpdatePosition(info.FileId, info.VolumeSerial, info.Position, info.FilePath, info.LastWriteTimeUtc);
+    await UpdatePosition(info.FileId, info.VolumeSerial, info.Position, info.FilePath, info.LastWriteTimeUtc, PositionUpdateMode.InMemoryAndPersist);
   }
 
   public async Task RemoveTrackedFileAsync(ulong fileId, long volumeSerial)
@@ -214,7 +217,7 @@ public class LiveStateService : IStateProvider, IHostedService
   {
     foreach (var update in updates) {
       await UpdatePosition(update.FileId, update.VolumeSerial, update.Position,
-                         update.FilePath, new DateTime(update.LastWriteTimeUtc));
+                         update.FilePath, new DateTime(update.LastWriteTimeUtc), PositionUpdateMode.InMemoryAndPersist);
     }
   }
 
@@ -241,9 +244,7 @@ public class LiveStateService : IStateProvider, IHostedService
   {
     _logger.LogInformation("LiveStateService stopping");
 
-    if (_cts != null) {
-      _cts.Cancel();
-    }
+    _cts?.Cancel();
 
     // Process any remaining checkpoint updates
     if (_checkpointChannel.Reader.Count > 0) {

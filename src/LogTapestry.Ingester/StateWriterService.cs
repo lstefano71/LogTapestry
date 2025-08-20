@@ -3,23 +3,16 @@ using Microsoft.Extensions.Logging;
 
 namespace LogTapestry.Ingester
 {
-  public class StateWriterService : IHostedService
+  public class StateWriterService(
+    ILogger<StateWriterService> logger,
+    CheckpointDataSink checkpointDataSink,
+    LiveStateService liveStateService) : IHostedService
   {
-    private readonly ILogger<StateWriterService> _logger;
-    private readonly CheckpointDataSink _checkpointDataSink;
-    private readonly LiveStateService _liveStateService;
+    private readonly ILogger<StateWriterService> _logger = logger;
+    private readonly CheckpointDataSink _checkpointDataSink = checkpointDataSink;
+    private readonly LiveStateService _liveStateService = liveStateService;
     private Task? _checkpointProcessingTask;
     private CancellationTokenSource? _cts;
-
-    public StateWriterService(
-      ILogger<StateWriterService> logger,
-      CheckpointDataSink checkpointDataSink,
-      LiveStateService liveStateService)
-    {
-      _logger = logger;
-      _checkpointDataSink = checkpointDataSink;
-      _liveStateService = liveStateService;
-    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -66,9 +59,7 @@ namespace LogTapestry.Ingester
     {
       _logger.LogInformation("StateWriterService stopping");
 
-      if (_cts != null) {
-        _cts.Cancel();
-      }
+      _cts?.Cancel();
 
       if (_checkpointProcessingTask != null) {
         await _checkpointProcessingTask;
