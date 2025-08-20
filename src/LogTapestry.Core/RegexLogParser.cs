@@ -22,7 +22,7 @@ namespace LogTapestry.Core
           : new Regex("^$", RegexOptions.Compiled); // Default: match nothing
     }
 
-    public IEnumerable<ParsingResult> Parse(string[] lines)
+    public IEnumerable<ParsingResult> Parse(IList<string> lines)
     {
       // Single-line mode: StartOfEntryRegex is not set or empty
       if (_settings.Config?.StartOfEntryRegex == null || string.IsNullOrWhiteSpace(_settings.Config.StartOfEntryRegex)) {

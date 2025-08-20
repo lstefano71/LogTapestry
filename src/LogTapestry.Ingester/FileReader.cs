@@ -92,7 +92,7 @@ namespace LogTapestry.Ingester
         }
 
         // Parse the new content
-        var results = parser.Parse([.. buffer]);
+        var results = parser.Parse(buffer);
         var successfulEntries = new List<LogEntry>();
 
         // Collect successful parsing results

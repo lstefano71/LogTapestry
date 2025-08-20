@@ -41,7 +41,7 @@ namespace LogTapestry.Ingester
       try {
         await foreach (var checkpointUpdate in _checkpointDataSink.CheckpointReader.ReadAllAsync(token)) {
           try {
-            _logger.LogDebug("Checkpoint processed for {FilePath}: position {Position} at {CheckpointTime}",
+            _logger.LogDebug("Checkpoint processed for {FilePath}: position {Position} at {CheckpointTime:u}",
               checkpointUpdate.FilePath,
               checkpointUpdate.Position,
               checkpointUpdate.CheckpointTime);

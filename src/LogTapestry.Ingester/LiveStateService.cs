@@ -56,32 +56,57 @@ public class LiveStateService : IStateProvider, IHostedService
   /// <summary>
   /// Update position in memory and queue for SQLite persistence.
   /// This implements the checkpointing principle: memory is source of truth.
+  /// Thread-safe to prevent duplicate updates from multiple workers.
   /// </summary>
   public async Task UpdatePosition(ulong fileId, long volumeSerial, long position, string filePath, DateTime lastWriteTime)
   {
     var key = (fileId, volumeSerial);
-    var trackedFile = new TrackedFileInfo {
-      FileId = fileId,
-      VolumeSerial = volumeSerial,
-      FilePath = filePath,
-      Position = position,
-      LastWriteTimeUtc = lastWriteTime
-    };
 
-    _positionCache[key] = trackedFile;
+    // Use thread-safe update to prevent duplicate processing
+    var updated = false;
+    _positionCache.AddOrUpdate(key,
+        // Add new entry
+        _ => {
+          updated = true;
+          return new TrackedFileInfo {
+            FileId = fileId,
+            VolumeSerial = volumeSerial,
+            FilePath = filePath,
+            Position = position,
+            LastWriteTimeUtc = lastWriteTime
+          };
+        },
+        // Update existing entry only if new position is greater
+        (existingKey, existingFile) => {
+          if (position > existingFile.Position) {
+            updated = true;
+            return new TrackedFileInfo {
+              FileId = fileId,
+              VolumeSerial = volumeSerial,
+              FilePath = filePath,
+              Position = position,
+              LastWriteTimeUtc = lastWriteTime
+            };
+          }
+          return existingFile;
+        });
 
-    // Queue checkpoint update for persistence
-    var checkpointUpdate = new CheckpointPositionUpdate(
-        fileId,
-        volumeSerial,
-        filePath,
-        position,
-        lastWriteTime,
-        DateTime.UtcNow
-    );
+    // Only queue checkpoint update if position was actually updated
+    if (updated) {
+      var checkpointUpdate = new CheckpointPositionUpdate(
+          fileId,
+          volumeSerial,
+          filePath,
+          position,
+          lastWriteTime,
+          DateTime.UtcNow
+      );
 
-    await _checkpointChannel.Writer.WriteAsync(checkpointUpdate, _cts?.Token ?? CancellationToken.None);
-    _logger.LogTrace("Queued checkpoint update for {FilePath}: position {Position}", filePath, position);
+      await _checkpointChannel.Writer.WriteAsync(checkpointUpdate, _cts?.Token ?? CancellationToken.None);
+      _logger.LogTrace("Queued checkpoint update for {FilePath}: position {Position}", filePath, position);
+    } else {
+      _logger.LogTrace("Skipped duplicate checkpoint update for {FilePath}: position {Position}", filePath, position);
+    }
   }
 
   /// <summary>
