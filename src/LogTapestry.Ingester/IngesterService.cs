@@ -4,8 +4,9 @@ using LogTapestry.Core;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-using System.Threading.Channels;
 using Open.ChannelExtensions;
+
+using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
 {
@@ -103,11 +104,9 @@ namespace LogTapestry.Ingester
     {
       // Pipeline: FileEvent -> FileCheckRequest -> PositionUpdate -> Batched DB Update
       var pipeline = _directoryMonitor.FileEvents
-        .Transform(async fileEvent =>
-        {
+        .Transform(async fileEvent => {
           // Transform FileEvent to FileCheckRequest
-          var fileRequest = new FileCheckRequest
-          {
+          var fileRequest = new FileCheckRequest {
             FileId = fileEvent.FileId,
             VolumeSerial = fileEvent.VolumeSerial,
             FilePath = fileEvent.FilePath,
@@ -119,28 +118,24 @@ namespace LogTapestry.Ingester
           await _fileReader.ReadAndParseFileAsync(
             fileRequest,
             _positionUpdateChannel.Writer,
+            _parsingResultChannel.Writer,
             token);
 
           return fileRequest;
         })
         .Batch(_settings.Ingester.StateWriterBatchSize)  // Batch file requests
-        .Transform(async batch =>
-        {
+        .Transform(async batch => {
           // Process batch of position updates
           var positionUpdates = new List<PositionUpdate>();
-          foreach (var _ in batch)
-          {
-            if (_positionUpdateChannel.Reader.TryRead(out var update))
-            {
+          foreach (var _ in batch) {
+            if (_positionUpdateChannel.Reader.TryRead(out var update)) {
               positionUpdates.Add(update);
             }
           }
 
-          if (positionUpdates.Any())
-          {
+          if (positionUpdates.Any()) {
             // Send batch to state writer service
-            foreach (var update in positionUpdates)
-            {
+            foreach (var update in positionUpdates) {
               await _stateWriterService.Writer.WriteAsync(update, token);
             }
           }
@@ -149,8 +144,7 @@ namespace LogTapestry.Ingester
         });
 
       // Consume the pipeline
-      await foreach (var resultTask in pipeline.ReadAllAsync(token))
-      {
+      await foreach (var resultTask in pipeline.ReadAllAsync(token)) {
         // Pipeline results are consumed here
         var result = await resultTask;
         _logger.LogDebug("Processed batch of {Count} file requests", result.Count);
@@ -162,16 +156,11 @@ namespace LogTapestry.Ingester
     /// </summary>
     private async Task ProcessFileEventsAsync(CancellationToken token)
     {
-      try
-      {
+      try {
         await SetupDeclarativePipelineAsync(token);
-      }
-      catch (OperationCanceledException)
-      {
+      } catch (OperationCanceledException) {
         _logger.LogInformation("Pipeline processing cancelled");
-      }
-      catch (Exception ex)
-      {
+      } catch (Exception ex) {
         _logger.LogError(ex, "Error in declarative pipeline");
       }
     }

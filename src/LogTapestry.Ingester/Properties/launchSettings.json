@@ -2,6 +2,7 @@
   "profiles": {
     "LogTapestry.Ingester": {
       "commandName": "Project",
+      "commandLineArgs": "--zap-db",
       "workingDirectory": "$(SolutionDir)"
     }
   }

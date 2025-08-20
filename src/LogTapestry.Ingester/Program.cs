@@ -18,8 +18,42 @@ public class Program
   public static async Task Main(string[] args)
   {
     bool validate = args.Contains("--validate");
+    bool zapDb = args.Contains("--zap-db");
 
     var exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+
+    // Early configuration for Serilog so zap-db logs are visible
+    var configBuilder = new ConfigurationBuilder()
+      .SetBasePath(exeDir!)
+      .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+    var configuration = configBuilder.Build();
+    var configSection = configuration.GetSection("Ingester");
+    var logLevelStr = configSection["LogLevel"] ?? "Information";
+    var logLevel = logLevelStr switch {
+      "Verbose" => Serilog.Events.LogEventLevel.Verbose,
+      "Debug" => Serilog.Events.LogEventLevel.Debug,
+      "Information" => Serilog.Events.LogEventLevel.Information,
+      "Warning" => Serilog.Events.LogEventLevel.Warning,
+      "Error" => Serilog.Events.LogEventLevel.Error,
+      "Fatal" => Serilog.Events.LogEventLevel.Fatal,
+      _ => Serilog.Events.LogEventLevel.Information
+    };
+    Log.Logger = new LoggerConfiguration()
+      .MinimumLevel.Is(logLevel)
+      .Enrich.With(new UtcTimestampEnricher())
+      .WriteTo.Console(restrictedToMinimumLevel: logLevel, outputTemplate: "{UtcTimestamp} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+      .WriteTo.File("logs/ingester-.log", rollingInterval: Serilog.RollingInterval.Day)
+      .WriteTo.File("logs/ingester-errors-.json", rollingInterval: Serilog.RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning, formatProvider: null)
+      .CreateLogger();
+
+    // Compute database path from Ingester.DataRoot
+    var dataRoot = configSection["DataRoot"] ?? "data";
+    var dbPath = Path.Combine(dataRoot, "state.sqlite");
+
+    // Zap DB directory if requested
+    if (zapDb) {
+      ZapDbDirectory(dataRoot);
+    }
 
     var builder = Host.CreateApplicationBuilder(args);
 
@@ -31,26 +65,8 @@ public class Program
       reloadOnChange: true
     );
 
-    // Configure Serilog
-    var configSection = builder.Configuration.GetSection("Ingester");
-    var logLevelStr = configSection["LogLevel"] ?? "Information";
-    var logLevel = logLevelStr switch {
-      "Verbose" => Serilog.Events.LogEventLevel.Verbose,
-      "Debug" => Serilog.Events.LogEventLevel.Debug,
-      "Information" => Serilog.Events.LogEventLevel.Information,
-      "Warning" => Serilog.Events.LogEventLevel.Warning,
-      "Error" => Serilog.Events.LogEventLevel.Error,
-      "Fatal" => Serilog.Events.LogEventLevel.Fatal,
-      _ => Serilog.Events.LogEventLevel.Information
-    };
-    builder.Services.AddSerilog((_, logConfig) => {
-      logConfig
-          .MinimumLevel.Is(logLevel)
-          .Enrich.With(new UtcTimestampEnricher())
-          .WriteTo.Console(restrictedToMinimumLevel: logLevel, outputTemplate: "{UtcTimestamp} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
-          .WriteTo.File("logs/ingester-.log", rollingInterval: Serilog.RollingInterval.Day)
-          .WriteTo.File("logs/ingester-errors-.json", rollingInterval: Serilog.RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning, formatProvider: null);
-    });
+    // Configure Serilog for DI
+    builder.Services.AddSerilog();
 
     // Bind configuration
     builder.Services.Configure<LogTapestrySettings>(builder.Configuration); // Bind to root
@@ -61,9 +77,6 @@ public class Program
         .ValidateDataAnnotations();
     builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<PluginSettings>>().Value);
 
-    // Compute database path from Ingester.DataRoot
-    var dataRoot = configSection["DataRoot"] ?? "data";
-    var dbPath = Path.Combine(dataRoot, "state.sqlite");
     builder.Services.AddSingleton<IStateProvider>(_ => new SqliteStateProvider(dbPath));
     builder.Services.AddSingleton<DirectoryMonitor>(sp => new DirectoryMonitor(
       sp.GetRequiredService<ILogger<DirectoryMonitor>>(),
@@ -92,18 +105,37 @@ public class Program
         var config = builder.Configuration;
         var directory = config.GetSection("Ingester:Directory").Value;
         if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory)) {
-          Console.WriteLine($"Validation failed: Directory '{directory}' does not exist.");
+          Log.Error("Validation failed: Directory '{Directory}' does not exist.", directory);
           Environment.Exit(1);
         }
         // Add more validation as needed
-        Console.WriteLine("Configuration validation succeeded.");
+        Log.Information("Configuration validation succeeded.");
         Environment.Exit(0);
       } catch (Exception ex) {
-        Console.WriteLine($"Validation failed: {ex.Message}");
+        Log.Error(ex, "Validation failed: {Message}", ex.Message);
         Environment.Exit(1);
       }
     } else {
       await host.RunAsync();
+    }
+  }
+
+  private static void ZapDbDirectory(string dataRoot)
+  {
+    try {
+      if (Directory.Exists(dataRoot)) {
+        foreach (var file in Directory.GetFiles(dataRoot)) {
+          File.Delete(file);
+        }
+        foreach (var dir in Directory.GetDirectories(dataRoot)) {
+          Directory.Delete(dir, true);
+        }
+        Log.Information("[--zap-db] Deleted all contents of data DB directory: {DataRoot}", dataRoot);
+      } else {
+        Log.Warning("[--zap-db] Data DB directory does not exist: {DataRoot}", dataRoot);
+      }
+    } catch (Exception ex) {
+      Log.Error(ex, "[--zap-db] Error deleting data DB directory contents: {Message}", ex.Message);
     }
   }
 }

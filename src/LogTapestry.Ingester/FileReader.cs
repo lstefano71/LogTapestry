@@ -19,19 +19,29 @@ namespace LogTapestry.Ingester
     private readonly List<PluginSettings> _pluginSettings;
     private readonly Matcher _matcher;
 
+    // Parser type mapping: maps plugin.Type to parser factory
+    private readonly ILoggerFactory _loggerFactory;
+    private static Func<PluginSettings, string, ILoggerFactory, ILogParser> RegexParserFactory =
+      (settings, filePath, loggerFactory) => new RegexLogParser(settings, filePath, loggerFactory.CreateLogger<RegexLogParser>());
+    private static readonly IReadOnlyDictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>> ParserFactories =
+      new Dictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>>(StringComparer.OrdinalIgnoreCase) {
+        ["regex"] = RegexParserFactory
+      };
+
     public FileReader(
       ILogger<FileReader> logger,
       IStateProvider stateProvider,
-      IOptions<LogTapestrySettings> settings)
+      IOptions<LogTapestrySettings> settings,
+      ILoggerFactory loggerFactory)
     {
       _logger = logger;
       _stateProvider = stateProvider;
       _pluginSettings = settings.Value.Plugins;
+      _loggerFactory = loggerFactory;
 
       // Create matcher for plugin include/exclude patterns
       _matcher = new Matcher();
-      foreach (var plugin in _pluginSettings)
-      {
+      foreach (var plugin in _pluginSettings) {
         _matcher.AddIncludePatterns(plugin.IncludePatterns);
         _matcher.AddExcludePatterns(plugin.ExcludePatterns);
       }
@@ -43,16 +53,21 @@ namespace LogTapestry.Ingester
     /// </summary>
     public async Task ReadAndParseFileAsync(
       FileCheckRequest request,
-      ChannelWriter<PositionUpdate> outputChannel,
+      ChannelWriter<PositionUpdate> positionChannel,
+      ChannelWriter<ParsingResult> parsingChannel,
       CancellationToken token)
     {
-      try
-      {
+      try {
         // Get the plugin for this file
         var plugin = GetPluginForFile(request.FilePath);
-        if (plugin == null)
-        {
+        if (plugin == null) {
           _logger.LogWarning("No plugin matched for file: {FilePath}", request.FilePath);
+          return;
+        }
+
+        // Select parser factory based on plugin.Type
+        if (!ParserFactories.TryGetValue(plugin.Type, out var parserFactory)) {
+          _logger.LogError("No parser available for plugin type: {Type} (file: {FilePath})", plugin.Type, request.FilePath);
           return;
         }
 
@@ -62,23 +77,20 @@ namespace LogTapestry.Ingester
 
         // Open file temporarily, read new content, then close immediately
         using var fs = new FileStream(request.FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        if (position > fs.Length)
-        {
+        if (position > fs.Length) {
           // File was truncated, reset position
           position = 0;
         }
 
         fs.Seek(position, SeekOrigin.Begin);
 
-        var parser = new RegexLogParser(plugin, request.FilePath);
+        var parser = parserFactory(plugin, request.FilePath, _loggerFactory);
         var newPosition = position;
         var buffer = new List<string>();
 
-        using (var sr = new StreamReader(fs, leaveOpen: true))
-        {
+        using (var sr = new StreamReader(fs, leaveOpen: true)) {
           string? line;
-          while ((line = await sr.ReadLineAsync(token)) != null)
-          {
+          while ((line = await sr.ReadLineAsync(token)) != null) {
             buffer.Add(line);
           }
         }
@@ -87,12 +99,10 @@ namespace LogTapestry.Ingester
         var results = parser.Parse([.. buffer]);
 
         // Send position update if we read new content
-        if (buffer.Count > 0)
-        {
+        if (buffer.Count > 0) {
           newPosition = fs.Position;
 
-          var positionUpdate = new PositionUpdate
-          {
+          var positionUpdate = new PositionUpdate {
             FileId = request.FileId,
             VolumeSerial = request.VolumeSerial,
             Position = newPosition,
@@ -100,27 +110,24 @@ namespace LogTapestry.Ingester
             LastWriteTimeUtc = request.LastWriteTimeUtc
           };
 
-          await outputChannel.WriteAsync(positionUpdate, token);
+          await positionChannel.WriteAsync(positionUpdate, token);
           _logger.LogDebug("Updated position for {FilePath}: {Position}", request.FilePath, newPosition);
         }
 
-        // Log parsing results
-        foreach (var result in results)
-        {
-          if (result.IsSuccess && result.Entry != null)
-          {
-            // In the new architecture, this would be sent to a parsing pipeline
-            _logger.LogDebug("Parsed log entry from {FilePath}", request.FilePath);
-          }
-          else
-          {
+        // Send parsing results to the next pipeline stage
+        foreach (var result in results) {
+          if (result.IsSuccess && result.Entry != null) {
+            // Send successful parsing result to the parsing pipeline
+            await parsingChannel.WriteAsync(result, token);
+            _logger.LogTrace("Sent parsed log entry from {FilePath} to parsing pipeline", request.FilePath);
+          } else {
+            // Send failed parsing result as well for error handling
+            await parsingChannel.WriteAsync(result, token);
             _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
               result.ErrorMessage, result.Source);
           }
         }
-      }
-      catch (Exception ex)
-      {
+      } catch (Exception ex) {
         _logger.LogError(ex, "Error reading file {FilePath}", request.FilePath);
       }
     }
@@ -147,14 +154,12 @@ namespace LogTapestry.Ingester
       // Use file name for matching (same logic as original TailingManager)
       var relPath = Path.GetFileName(filePath);
 
-      foreach (var plugin in _pluginSettings)
-      {
+      foreach (var plugin in _pluginSettings) {
         var pluginMatcher = new Matcher();
         pluginMatcher.AddIncludePatterns(plugin.IncludePatterns);
         pluginMatcher.AddExcludePatterns(plugin.ExcludePatterns);
 
-        if (pluginMatcher.Match(relPath).HasMatches)
-        {
+        if (pluginMatcher.Match(relPath).HasMatches) {
           return plugin;
         }
       }

@@ -1,22 +1,22 @@
+using Microsoft.Extensions.Logging;
+
 using System.Text;
 using System.Text.RegularExpressions;
-
 
 namespace LogTapestry.Core
 {
   public class RegexLogParser : ILogParser
   {
-    private readonly StringBuilder _multiLineBuffer;
-    private LogEntry? _inProgressEntry;
-    private Regex _startOfEntryRegex;
     private readonly PluginSettings _settings;
     private readonly string _sourceFile;
+    private readonly ILogger? _logger;
+    private readonly Regex _startOfEntryRegex;
 
-    public RegexLogParser(PluginSettings settings, string sourceFile)
+    public RegexLogParser(PluginSettings settings, string sourceFile, ILogger? logger = null)
     {
       _settings = settings;
       _sourceFile = sourceFile;
-      _multiLineBuffer = new StringBuilder();
+      _logger = logger;
       _startOfEntryRegex = settings.Config?.StartOfEntryRegex != null
           ? new Regex(settings.Config.StartOfEntryRegex, RegexOptions.Compiled)
           : new Regex("^$", RegexOptions.Compiled); // Default: match nothing
@@ -24,37 +24,38 @@ namespace LogTapestry.Core
 
     public IEnumerable<ParsingResult> Parse(string[] lines)
     {
-      if (_startOfEntryRegex == null) yield break;
+      StringBuilder multiLineBuffer = new();
+      LogEntry? inProgressEntry = null;
+      bool entryParseFailed = false;
+
       foreach (var line in lines) {
         if (_startOfEntryRegex.IsMatch(line)) {
-          if (_inProgressEntry != null) {
-            yield return FinalizeEntry();
+          if (inProgressEntry != null) {
+            yield return FinalizeEntry(multiLineBuffer, inProgressEntry, entryParseFailed);
           }
-          _inProgressEntry = StartNewEntry(line);
+          (inProgressEntry, entryParseFailed) = StartNewEntry(line);
+          multiLineBuffer.Clear();
+          multiLineBuffer.AppendLine(line);
         } else {
-          _multiLineBuffer.AppendLine(line);
+          multiLineBuffer.AppendLine(line);
         }
       }
+      // Do not finalize here; Flush will handle any remaining entry
     }
 
     public ParsingResult? Flush()
     {
-      if (_inProgressEntry != null) {
-        return FinalizeEntry();
-      }
+      // Stateless: nothing to flush
       return null;
     }
 
-    private LogEntry StartNewEntry(string line)
+    private (LogEntry, bool) StartNewEntry(string line)
     {
-      _multiLineBuffer.Clear();
-      _multiLineBuffer.AppendLine(line); // Always append with EOL
-
       var timestamp = DateTime.MinValue;
       var level = "UNKNOWN";
       var message = line;
-      // Fields will be extracted in FinalizeEntry from the full message
       var fields = new Dictionary<string, object>();
+      bool entryParseFailed = false;
 
       if (!string.IsNullOrEmpty(_settings.Config.TimestampRegex)) {
         var match = Regex.Match(line, _settings.Config.TimestampRegex);
@@ -65,58 +66,52 @@ namespace LogTapestry.Core
             } else {
               timestamp = parsedTimestamp;
             }
+            return (new LogEntry(timestamp, level, message, _sourceFile, 0, fields, Array.Empty<byte>()), false);
           }
         }
       }
-
-      // ULID will be assigned by the ingestion system
-      return new LogEntry(timestamp, level, message, _sourceFile, 0, fields, Array.Empty<byte>());
+      _logger?.LogWarning("Plugin: {name}, failed to parse timestamp for line: {Line}", _settings.Name, line);
+      entryParseFailed = true;
+      return (new LogEntry(timestamp, level, message, _sourceFile, 0, fields, Array.Empty<byte>()), entryParseFailed);
     }
 
-    private ParsingResult FinalizeEntry()
+    private ParsingResult FinalizeEntry(StringBuilder multiLineBuffer, LogEntry inProgressEntry, bool entryParseFailed)
     {
-      // Remove trailing EOL if present
-      var finalMessage = _multiLineBuffer.ToString().TrimEnd('\r', '\n');
-      if (_inProgressEntry != null) {
-        // Extract fields from the full message
-        var fields = new Dictionary<string, object>();
-        if (_settings.Config.FieldsRegexes != null) {
-          foreach (var fieldRegex in _settings.Config.FieldsRegexes) {
-            if (string.IsNullOrEmpty(fieldRegex.Regex) || string.IsNullOrEmpty(fieldRegex.FieldName)) continue;
-            var matches = Regex.Matches(finalMessage, fieldRegex.Regex);
-            if (matches.Count > 0) {
-              // Use the last match (in case of multiple occurrences)
-              var match = matches[^1];
-              var valueStr = match.Groups[1].Value;
-              object value = valueStr;
-              if (fieldRegex.Type == "long") {
-                if (long.TryParse(valueStr, out var longValue)) {
-                  value = longValue;
-                }
-              } else if (fieldRegex.Type == "double") {
-                if (double.TryParse(valueStr, out var doubleValue)) {
-                  value = doubleValue;
-                }
-              }
-              fields[fieldRegex.FieldName] = value;
-            }
-          }
-        }
-        // Extract level from the full message
-        var level = _inProgressEntry.Level;
-        if (!string.IsNullOrEmpty(_settings.Config.LevelRegex)) {
-          var match = Regex.Match(finalMessage, _settings.Config.LevelRegex);
-          if (match.Success) {
-            level = match.Groups[1].Value;
-          }
-        }
-        // Preserve ULID from _inProgressEntry
-        var entry = _inProgressEntry with { Message = finalMessage, Fields = fields, Level = level, Ulid = _inProgressEntry.Ulid };
-        _inProgressEntry = null;
-        _multiLineBuffer.Clear();
-        return ParsingResult.Success(entry);
+      var finalMessage = multiLineBuffer.ToString().TrimEnd('\r', '\n');
+      if (entryParseFailed) {
+        return ParsingResult.Failure("Failed to parse timestamp", finalMessage, _sourceFile);
       }
-      return ParsingResult.Failure("FinalizeEntry called with null _inProgressEntry", finalMessage, _sourceFile);
+      var fields = new Dictionary<string, object>();
+      if (_settings.Config.FieldsRegexes != null) {
+        foreach (var fieldRegex in _settings.Config.FieldsRegexes) {
+          if (string.IsNullOrEmpty(fieldRegex.Regex) || string.IsNullOrEmpty(fieldRegex.FieldName)) continue;
+          var matches = Regex.Matches(finalMessage, fieldRegex.Regex);
+          if (matches.Count > 0) {
+            var match = matches[^1];
+            var valueStr = match.Groups[1].Value;
+            object value = valueStr;
+            if (fieldRegex.Type == "long") {
+              if (long.TryParse(valueStr, out var longValue)) {
+                value = longValue;
+              }
+            } else if (fieldRegex.Type == "double") {
+              if (double.TryParse(valueStr, out var doubleValue)) {
+                value = doubleValue;
+              }
+            }
+            fields[fieldRegex.FieldName] = value;
+          }
+        }
+      }
+      var level = inProgressEntry.Level;
+      if (!string.IsNullOrEmpty(_settings.Config.LevelRegex)) {
+        var match = Regex.Match(finalMessage, _settings.Config.LevelRegex);
+        if (match.Success) {
+          level = match.Groups[1].Value;
+        }
+      }
+      var entry = inProgressEntry with { Message = finalMessage, Fields = fields, Level = level, Ulid = inProgressEntry.Ulid };
+      return ParsingResult.Success(entry);
     }
   }
 }
