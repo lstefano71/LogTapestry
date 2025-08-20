@@ -41,9 +41,10 @@ public class Program
     Log.Logger = new LoggerConfiguration()
       .MinimumLevel.Is(logLevel)
       .Enrich.With(new UtcTimestampEnricher())
-      .WriteTo.Console(restrictedToMinimumLevel: logLevel, outputTemplate: "{UtcTimestamp} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
-      .WriteTo.File("logs/ingester-.log", rollingInterval: Serilog.RollingInterval.Day)
-      .WriteTo.File("logs/ingester-errors-.json", rollingInterval: Serilog.RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning, formatProvider: null)
+      .Enrich.With(new ManagedThreadIdEnricher())
+      .WriteTo.Console(restrictedToMinimumLevel: logLevel, outputTemplate: "{UtcTimestamp} [{Level:u3}] [T{ManagedThreadId}] {Message:lj}{NewLine}{Exception}")
+      .WriteTo.File("logs/ingester-.log", rollingInterval: RollingInterval.Day, outputTemplate: "{UtcTimestamp} [{Level:u3}] [T{ManagedThreadId}] {Message:lj}{NewLine}{Exception}")
+      .WriteTo.File("logs/ingester-errors-.json", rollingInterval: RollingInterval.Day, restrictedToMinimumLevel: Serilog.Events.LogEventLevel.Warning, formatProvider: null)
       .CreateLogger();
 
     // Compute database path from Ingester.DataRoot

@@ -3,7 +3,6 @@ using LogTapestry.Core;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -46,12 +45,12 @@ namespace LogTapestry.Ingester
         dirHealthy = Directory.Exists(_settings.Directory);
 
         if (dbHealthy && dirHealthy) {
-          return Results.Json(new { status = "Healthy", timestamp = DateTime.UtcNow });
+          return Json(new { status = "Healthy", timestamp = DateTime.UtcNow });
         } else {
           var errors = new List<string>();
           if (!dbHealthy) errors.Add("Database check failed.");
           if (!dirHealthy) errors.Add("Directory check failed.");
-          return Results.Json(new { status = "Unhealthy", errors }, statusCode: 503);
+          return Json(new { status = "Unhealthy", errors }, statusCode: 503);
         }
       });
 
