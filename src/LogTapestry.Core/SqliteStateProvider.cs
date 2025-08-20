@@ -153,6 +153,45 @@ namespace LogTapestry.Core
       return null;
     }
 
+    public async Task UpdateTrackedFilesBatchAsync(PositionUpdate[] updates)
+    {
+      if (updates.Length == 0) return;
+
+      using var transaction = _connection.BeginTransaction();
+      try {
+        var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+                    INSERT INTO TrackedFiles (VolumeSerial, FileId, FilePath, Position, LastWriteTimeUtc)
+                    VALUES (@volumeSerial, @fileId, @filePath, @position, @lastWriteTimeUtc)
+                    ON CONFLICT(VolumeSerial, FileId) DO UPDATE SET
+                        FilePath=excluded.FilePath,
+                        Position=excluded.Position,
+                        LastWriteTimeUtc=excluded.LastWriteTimeUtc;
+                ";
+
+        var volumeSerialParam = cmd.Parameters.Add("@volumeSerial", Microsoft.Data.Sqlite.SqliteType.Integer);
+        var fileIdParam = cmd.Parameters.Add("@fileId", Microsoft.Data.Sqlite.SqliteType.Integer);
+        var filePathParam = cmd.Parameters.Add("@filePath", Microsoft.Data.Sqlite.SqliteType.Text);
+        var positionParam = cmd.Parameters.Add("@position", Microsoft.Data.Sqlite.SqliteType.Integer);
+        var lastWriteTimeParam = cmd.Parameters.Add("@lastWriteTimeUtc", Microsoft.Data.Sqlite.SqliteType.Integer);
+
+        foreach (var update in updates) {
+          volumeSerialParam.Value = update.VolumeSerial;
+          fileIdParam.Value = (long)update.FileId;
+          filePathParam.Value = update.FilePath;
+          positionParam.Value = update.Position;
+          lastWriteTimeParam.Value = new DateTimeOffset(new DateTime(update.LastWriteTimeUtc)).ToUnixTimeSeconds();
+
+          await cmd.ExecuteNonQueryAsync();
+        }
+
+        transaction.Commit();
+      } catch {
+        transaction.Rollback();
+        throw;
+      }
+    }
+
     public SqliteConnection GetConnection()
     {
       return _connection;

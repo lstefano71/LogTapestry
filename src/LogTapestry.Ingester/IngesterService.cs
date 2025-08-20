@@ -8,93 +8,155 @@ using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
 {
+  /// <summary>
+  /// Refactored IngesterService using declarative worker pool architecture.
+  /// Replaces the old TailingManager-based model with a scalable channel-based pipeline.
+  /// </summary>
   public class IngesterService : IHostedService
   {
     private readonly ILogger<IngesterService> _logger;
     private readonly LogTapestrySettings _settings;
     private readonly DirectoryMonitor _directoryMonitor;
-    private readonly TailingManager _tailingManager;
-    private readonly DataSink _dataSink; // Injected DataSink
-    private Task? _monitorTask;
-    private Task? _tailingTask;
-    private Task? _consumerTask; // Consumer pipeline task
-    private Channel<FileWorkItem>? _workChannel;
-    private Channel<ParsingResult>? _outputChannel;
+    private readonly StateWriterService _stateWriterService;
+    private readonly DataSink _dataSink;
+    private readonly IStateProvider _stateProvider;
+
+    // New declarative pipeline components
+    private readonly Channel<FileCheckRequest> _fileRequestChannel;
+    private readonly Channel<PositionUpdate> _positionUpdateChannel;
+    private readonly Channel<ParsingResult> _parsingResultChannel;
+
+    private Task? _directoryMonitorTask;
+    private Task? _stateWriterTask;
+    private Task? _workerPoolTask;
+    private Task? _consumerTask;
     private CancellationTokenSource? _cts;
 
     public IngesterService(
       ILogger<IngesterService> logger,
       Microsoft.Extensions.Options.IOptions<LogTapestrySettings> options,
       DirectoryMonitor directoryMonitor,
-      TailingManager tailingManager,
-      DataSink dataSink)
+      StateWriterService stateWriterService,
+      DataSink dataSink,
+      IStateProvider stateProvider)
     {
       _logger = logger;
       _settings = options.Value;
       _directoryMonitor = directoryMonitor;
-      _tailingManager = tailingManager;
+      _stateWriterService = stateWriterService;
       _dataSink = dataSink;
+      _stateProvider = stateProvider;
+
+      // Initialize declarative pipeline channels
+      _fileRequestChannel = Channel.CreateUnbounded<FileCheckRequest>();
+      _positionUpdateChannel = Channel.CreateUnbounded<PositionUpdate>();
+      _parsingResultChannel = Channel.CreateBounded<ParsingResult>(10000);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-      _logger.LogInformation("IngesterService starting.");
+      _logger.LogInformation("Starting declarative worker pool architecture");
 
-      _workChannel = Channel.CreateUnbounded<FileWorkItem>();
-      _outputChannel = Channel.CreateBounded<ParsingResult>(10000); // Bounded for safety
       _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-      _monitorTask = _directoryMonitor.RunAsync(_workChannel.Writer, _cts.Token);
-      _tailingTask = _tailingManager.RunAsync(_workChannel.Reader, _outputChannel.Writer, _cts.Token);
+      // Start directory monitoring pipeline
+      _directoryMonitorTask = _directoryMonitor.RunAsync(_cts.Token);
 
-      // Start consumer pipeline
-      _consumerTask = Task.Run(async () => {
-        var batch = new List<LogEntry>();
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+      // Start state writer service
+      _stateWriterTask = _stateWriterService.StartAsync(_cts.Token);
 
-        try {
-          // The idiomatic and race-free way to use a PeriodicTimer.
-          // This loop will execute approximately every 5 seconds.
-          while (await timer.WaitForNextTickAsync(_cts.Token)) {
-            try {
-              // After each tick, drain whatever is currently in the channel.
-              // This is a non-blocking loop. If the channel is empty, it does nothing.
-              while (_outputChannel.Reader.TryRead(out var result)) {
-                if (result.IsSuccess && result.Entry != null) {
-                  batch.Add(result.Entry);
-                } else {
-                  _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}, Text: {UnparseableText}", result.ErrorMessage, result.Source, result.UnparseableText);
-                }
+      // Start worker pool for file processing
+      _workerPoolTask = StartWorkerPoolAsync(_cts.Token);
 
-                // To avoid letting the batch grow too large during a high-volume burst
-                // that lasts longer than the timer's interval, we still check the batch size here.
-                if (batch.Count >= _settings.Ingester.BatchSize) {
-                  await WriteBatch(batch);
-                  batch.Clear();
-                }
+      // Start consumer pipeline for parsing results
+      _consumerTask = StartConsumerPipelineAsync(_cts.Token);
+
+      return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Starts the worker pool that processes file events from directory monitoring.
+    /// </summary>
+    private async Task StartWorkerPoolAsync(CancellationToken token)
+    {
+      _logger.LogInformation("Starting worker pool with {WorkerCount} workers",
+        _settings.Ingester.FileReaderThreadPoolSize);
+
+      // Start multiple worker tasks
+      var workerTasks = new List<Task>();
+      for (int i = 0; i < _settings.Ingester.FileReaderThreadPoolSize; i++) {
+        workerTasks.Add(Task.Run(() => ProcessFileEventsAsync(token), token));
+      }
+
+      await Task.WhenAll(workerTasks);
+    }
+
+    /// <summary>
+    /// Worker task that processes file events and converts them to file check requests.
+    /// </summary>
+    private async Task ProcessFileEventsAsync(CancellationToken token)
+    {
+      await foreach (var fileEvent in _directoryMonitor.FileEvents.ReadAllAsync(token)) {
+        var fileRequest = new FileCheckRequest {
+          FileId = fileEvent.FileId,
+          VolumeSerial = fileEvent.VolumeSerial,
+          FilePath = fileEvent.FilePath,
+          LastWriteTimeUtc = fileEvent.LastWriteTimeUtc,
+          Type = fileEvent.Type
+        };
+
+        await _fileRequestChannel.Writer.WriteAsync(fileRequest, token);
+
+        // Process the file using FileReader
+        await FileReader.ReadAndParseFileAsync(
+          fileRequest,
+          _positionUpdateChannel.Writer,
+          _logger,
+          token);
+      }
+    }
+
+    /// <summary>
+    /// Starts the consumer pipeline that processes parsing results.
+    /// </summary>
+    private async Task StartConsumerPipelineAsync(CancellationToken token)
+    {
+      _logger.LogInformation("Starting consumer pipeline");
+
+      var batch = new List<LogEntry>();
+      using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+
+      try {
+        while (await timer.WaitForNextTickAsync(token)) {
+          try {
+            // Drain parsing results
+            while (_parsingResultChannel.Reader.TryRead(out var result)) {
+              if (result.IsSuccess && result.Entry != null) {
+                batch.Add(result.Entry);
+              } else {
+                _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
+                  result.ErrorMessage, result.Source);
               }
 
-              // After draining the channel, if there's anything left in the batch, write it.
-              // This handles the case where log volume is low and the batch never reaches the batch size.
-              if (batch.Count > 0) {
+              // Write batch if it reaches the size limit
+              if (batch.Count >= _settings.Ingester.BatchSize) {
                 await WriteBatch(batch);
                 batch.Clear();
               }
-            } catch (Exception ex) {
-              // Catching exceptions inside the loop makes the consumer resilient to transient errors.
-              _logger.LogError(ex, "An error occurred in a single consumer pipeline iteration.");
             }
+
+            // Write remaining batch items
+            if (batch.Count > 0) {
+              await WriteBatch(batch);
+              batch.Clear();
+            }
+          } catch (Exception ex) {
+            _logger.LogError(ex, "Error in consumer pipeline iteration");
           }
-        } catch (OperationCanceledException) {
-          // This is the expected way to exit the loop when shutdown is requested.
-          _logger.LogInformation("Consumer pipeline cancellation requested.");
         }
-
-        _logger.LogInformation("Consumer pipeline has shut down.");
-
-      }, _cts.Token);
-
-      return Task.CompletedTask;
+      } catch (OperationCanceledException) {
+        _logger.LogInformation("Consumer pipeline cancelled");
+      }
     }
 
     private async Task WriteBatch(List<LogEntry> batch)
@@ -135,12 +197,34 @@ namespace LogTapestry.Ingester
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-      _logger.LogInformation("IngesterService stopping.");
-      _cts?.Cancel();
-      Task?[] tasks = [_monitorTask, _tailingTask, _consumerTask];
-      foreach (var t in tasks) {
-        if (t != null) await t;
+      _logger.LogInformation("Stopping declarative worker pool architecture");
+
+      if (_cts != null) {
+        _cts.Cancel();
       }
+
+      // Stop directory monitor
+      if (_directoryMonitorTask != null) {
+        await _directoryMonitor.StopAsync();
+      }
+
+      // Stop state writer service
+      if (_stateWriterTask != null) {
+        await _stateWriterService.StopAsync(cancellationToken);
+      }
+
+      // Wait for all tasks to complete
+      var tasks = new List<Task>();
+      if (_directoryMonitorTask != null) tasks.Add(_directoryMonitorTask);
+      if (_stateWriterTask != null) tasks.Add(_stateWriterTask);
+      if (_workerPoolTask != null) tasks.Add(_workerPoolTask);
+      if (_consumerTask != null) tasks.Add(_consumerTask);
+
+      if (tasks.Any()) {
+        await Task.WhenAll(tasks);
+      }
+
+      _logger.LogInformation("Declarative worker pool architecture stopped");
     }
   }
 }

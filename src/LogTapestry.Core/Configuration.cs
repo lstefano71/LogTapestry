@@ -20,6 +20,12 @@ public class IngesterSettings
   public int BatchSize { get; set; } = 50000;
   public int PollingIntervalMs { get; set; } = 1000;
   public string MonitoringUrl { get; set; } = "";
+
+  // New configuration for worker pool architecture
+  public int FileReaderThreadPoolSize { get; set; } = 8;
+  public int StateWriterBatchSize { get; set; } = 1000;
+  public int StateWriterIntervalSeconds { get; set; } = 2;
+  public int FileSystemWatcherBufferSize { get; set; } = 65536;
 }
 
 public class PluginSettings

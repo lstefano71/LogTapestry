@@ -1,229 +1,103 @@
 // LogTapestry.Ingester/DirectoryMonitor.cs
 using LogTapestry.Core;
 
-using Microsoft.Extensions.FileSystemGlobbing;
-using Microsoft.Extensions.FileSystemGlobbing.Abstractions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
 {
-  public enum FileWorkType
-  {
-    FileAdded,
-    FileChanged,
-    FileRemovedOrRotated
-  }
-
-  public class FileWorkItem
-  {
-    public FileWorkType Type { get; set; }
-    public long VolumeSerial { get; set; }
-    public ulong FileId { get; set; }
-    public string FilePath { get; set; }
-    public long LastWriteTimeUtc { get; set; }
-  }
-
+  /// <summary>
+  /// Refactored DirectoryMonitor using priority-aware pipeline architecture.
+  /// Coordinates initial scan and real-time file watching through PriorityMonitor.
+  /// </summary>
   public class DirectoryMonitor
   {
-    private readonly ILogger _logger;
+    private readonly ILogger<DirectoryMonitor> _logger;
     private readonly IngesterSettings _settings;
     private readonly IStateProvider _stateProvider;
-    private readonly Channel<FileWorkItem> _channel;
-    private readonly ConcurrentQueue<string> _retryQueue = new();
+    private readonly PriorityMonitor _priorityMonitor;
+    private readonly InitialScanProducer _initialScanProducer;
+    private readonly WatcherProducer _watcherProducer;
+    private Task? _priorityTask;
+    private Task? _initialScanTask;
+    private Task? _watcherTask;
+    private CancellationTokenSource? _cts;
 
-    public DirectoryMonitor(IOptions<IngesterSettings> options,
-      IStateProvider stateProvider,
-      ILoggerFactory loggerFactory)
+    public DirectoryMonitor(
+      ILogger<DirectoryMonitor> logger,
+      IOptions<IngesterSettings> options,
+      IStateProvider stateProvider)
     {
+      _logger = logger;
       _settings = options.Value;
       _stateProvider = stateProvider;
-      _logger = loggerFactory.CreateLogger("DirectoryMonitor");
-      _channel = Channel.CreateUnbounded<FileWorkItem>();
+
+      // Create specific loggers for each component
+      var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+      _priorityMonitor = new PriorityMonitor(loggerFactory.CreateLogger<PriorityMonitor>());
+      _initialScanProducer = new InitialScanProducer(loggerFactory.CreateLogger<InitialScanProducer>(), options, stateProvider);
+      _watcherProducer = new WatcherProducer(loggerFactory.CreateLogger<WatcherProducer>(), options);
     }
 
-    public ChannelReader<FileWorkItem> WorkItems => _channel.Reader;
+    /// <summary>
+    /// Returns a channel reader for consuming prioritized file events.
+    /// </summary>
+    public ChannelReader<FileEvent> FileEvents => _priorityMonitor.Reader;
 
-    public async Task RunAsync(ChannelWriter<FileWorkItem> writer, System.Threading.CancellationToken token)
+    /// <summary>
+    /// Starts the priority-based file monitoring pipeline.
+    /// </summary>
+    public async Task RunAsync(CancellationToken token)
     {
+      _logger.LogInformation("Starting priority-based file monitoring pipeline");
+
+      _cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+
       try {
-        await InitialScanAsync(writer);
+        // Start the priority monitor
+        _priorityTask = _priorityMonitor.ProcessEventsAsync(
+          _watcherProducer.Reader,
+          _initialScanProducer.Reader,
+          _cts.Token);
 
-        // Create matcher for include/exclude patterns
-        var matcher = new Matcher();
-        matcher.AddIncludePatterns(_settings.IncludePatterns);
-        matcher.AddExcludePatterns(_settings.ExcludePatterns);
+        // Start the watcher producer
+        _watcherTask = _watcherProducer.RunAsync(_cts.Token);
 
-        var watcher = new FileSystemWatcher(_settings.Directory, "*") {
-          IncludeSubdirectories = true,
-          EnableRaisingEvents = true,
-          InternalBufferSize = 64 * 1024
-        };
+        // Start the initial scan producer
+        _initialScanTask = _initialScanProducer.RunAsync(_cts.Token);
 
-        bool IsMatch(string path)
-        {
-          var dirRoot = new DirectoryInfo(_settings.Directory);
-          var relPath = Path.GetRelativePath(_settings.Directory, path);
-          var result = matcher.Match(relPath);
-          return result.HasMatches;
-        }
+        // Wait for all tasks to complete
+        await Task.WhenAll(_priorityTask, _watcherTask, _initialScanTask);
 
-        void OnChanged(object sender, FileSystemEventArgs e)
-        {
-          if (!IsMatch(e.FullPath)) return;
-          var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
-          if (fileIdObj == null) {
-            _retryQueue.Enqueue(e.FullPath);
-            return;
-          }
-          var id = fileIdObj.FileId;
-          var diskWriteTime = File.GetLastWriteTimeUtc(e.FullPath).Ticks;
-          writer.TryWrite(new FileWorkItem {
-            Type = FileWorkType.FileChanged,
-            VolumeSerial = fileIdObj.VolumeSerial,
-            FileId = id,
-            FilePath = e.FullPath,
-            LastWriteTimeUtc = diskWriteTime
-          });
-        }
-
-        void OnCreated(object sender, FileSystemEventArgs e)
-        {
-          if (!IsMatch(e.FullPath)) return;
-          var fileIdObj = NtfsUtils.GetFileIdentifier(e.FullPath);
-          if (fileIdObj == null) {
-            _retryQueue.Enqueue(e.FullPath);
-            return;
-          }
-          var id = fileIdObj.FileId;
-          writer.TryWrite(new FileWorkItem {
-            Type = FileWorkType.FileAdded,
-            VolumeSerial = fileIdObj.VolumeSerial,
-            FileId = id,
-            FilePath = e.FullPath,
-            LastWriteTimeUtc = File.GetLastWriteTimeUtc(e.FullPath).Ticks
-          });
-        }
-
-        void OnDeleted(object sender, FileSystemEventArgs e)
-        {
-          // On deletion, we can't get file ID, so we rely on state reconciliation
-          // Trigger a full scan to resync
-          _ = InitialScanAsync(writer);
-        }
-
-        void OnRenamed(object sender, RenamedEventArgs e)
-        {
-          // Treat as deletion + creation
-          _ = InitialScanAsync(writer);
-        }
-
-        void OnError(object sender, ErrorEventArgs e)
-        {
-          // Resync on error
-          _ = InitialScanAsync(writer);
-        }
-
-        watcher.Changed += OnChanged;
-        watcher.Created += OnCreated;
-        watcher.Deleted += OnDeleted;
-        watcher.Renamed += OnRenamed;
-        watcher.Error += OnError;
-
-        // Keep alive until cancellation requested
-        while (!token.IsCancellationRequested) {
-          // Retry logic: process files in the retry queue
-          for (int i = 0; i < _retryQueue.Count; i++) {
-            if (_retryQueue.TryDequeue(out var retryPath)) {
-              if (!IsMatch(retryPath)) continue;
-              if (!File.Exists(retryPath)) {
-                // File was deleted, do not re-enqueue
-                continue;
-              }
-              var fileIdObj = NtfsUtils.GetFileIdentifier(retryPath);
-              if (fileIdObj == null) {
-                // Still locked, re-enqueue for next round
-                _retryQueue.Enqueue(retryPath);
-                continue;
-              }
-              var id = fileIdObj.FileId;
-              var diskWriteTime = File.GetLastWriteTimeUtc(retryPath).Ticks;
-              writer.TryWrite(new FileWorkItem {
-                Type = FileWorkType.FileAdded,
-                VolumeSerial = fileIdObj.VolumeSerial,
-                FileId = id,
-                FilePath = retryPath,
-                LastWriteTimeUtc = diskWriteTime
-              });
-            }
-          }
-          await Task.Delay(500, token);
-        }
-
-        watcher.EnableRaisingEvents = false;
-        watcher.Dispose();
-      } catch (TaskCanceledException) {
-        // Expected on shutdown, ignore
+        _logger.LogInformation("Priority-based file monitoring pipeline completed");
+      } catch (OperationCanceledException) {
+        _logger.LogInformation("File monitoring pipeline cancelled");
+      } catch (Exception ex) {
+        _logger.LogError(ex, "Error in file monitoring pipeline");
+        throw;
       }
     }
 
-    private async Task InitialScanAsync(ChannelWriter<FileWorkItem> writer)
+    /// <summary>
+    /// Stops the file monitoring pipeline.
+    /// </summary>
+    public async Task StopAsync()
     {
-      var trackedFiles = await _stateProvider.GetAllTrackedFilesAsync();
-      var seen = new HashSet<ulong>();
+      _logger.LogInformation("Stopping file monitoring pipeline");
 
-      // Create matcher for include/exclude patterns
-      var matcher = new Matcher();
-      matcher.AddIncludePatterns(_settings.IncludePatterns);
-      matcher.AddExcludePatterns(_settings.ExcludePatterns);
-      var dirRoot = new DirectoryInfo(_settings.Directory);
-      var dirWrapper = new DirectoryInfoWrapper(dirRoot);
-      var matchResult = matcher.Execute(dirWrapper);
-      foreach (var file in matchResult.Files) {
-        var filePath = Path.Combine(_settings.Directory, file.Path);
-        var fileIdObj = NtfsUtils.GetFileIdentifier(filePath);
-        if (fileIdObj == null) continue;
-        var id = fileIdObj.FileId;
-        seen.Add(id);
-
-        if (!trackedFiles.TryGetValue(id, out TrackedFileInfo? tracked)) {
-          _logger.LogDebug("File added: {FilePath} (ID: {FileId})", filePath, id);
-          await writer.WriteAsync(new FileWorkItem {
-            Type = FileWorkType.FileAdded,
-            VolumeSerial = fileIdObj.VolumeSerial,
-            FileId = id,
-            FilePath = filePath,
-            LastWriteTimeUtc = File.GetLastWriteTimeUtc(filePath).Ticks
-          });
-        } else {
-          var diskWriteTime = File.GetLastWriteTimeUtc(filePath).Ticks;
-          if (diskWriteTime > tracked.LastWriteTimeUtc.Ticks) {
-            _logger.LogDebug("File changed: {FilePath} (ID: {FileId})", filePath, id);
-            await writer.WriteAsync(new FileWorkItem {
-              Type = FileWorkType.FileChanged,
-              VolumeSerial = fileIdObj.VolumeSerial,
-              FileId = id,
-              FilePath = filePath,
-              LastWriteTimeUtc = diskWriteTime
-            });
-          }
-        }
+      if (_cts != null) {
+        _cts.Cancel();
       }
 
-      foreach (var kvp in trackedFiles) {
-        if (!seen.Contains(kvp.Key)) {
-          _logger.LogDebug("File removed or rotated: {FilePath} (ID: {FileId})", kvp.Value.FilePath, kvp.Value.FileId);
-          await writer.WriteAsync(new FileWorkItem {
-            Type = FileWorkType.FileRemovedOrRotated,
-            VolumeSerial = kvp.Value.VolumeSerial,
-            FileId = kvp.Value.FileId,
-            FilePath = kvp.Value.FilePath,
-            LastWriteTimeUtc = kvp.Value.LastWriteTimeUtc.Ticks
-          });
-        }
+      var tasks = new List<Task>();
+      if (_priorityTask != null) tasks.Add(_priorityTask);
+      if (_watcherTask != null) tasks.Add(_watcherTask);
+      if (_initialScanTask != null) tasks.Add(_initialScanTask);
+
+      if (tasks.Any()) {
+        await Task.WhenAll(tasks);
       }
     }
   }

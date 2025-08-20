@@ -66,15 +66,9 @@ public class Program
     var dbPath = Path.Combine(dataRoot, "state.sqlite");
     builder.Services.AddSingleton<IStateProvider>(_ => new SqliteStateProvider(dbPath));
     builder.Services.AddSingleton<DirectoryMonitor>(sp => new DirectoryMonitor(
+      sp.GetRequiredService<ILogger<DirectoryMonitor>>(),
       sp.GetRequiredService<IOptions<IngesterSettings>>(),
-      sp.GetRequiredService<IStateProvider>(),
-      sp.GetRequiredService<ILoggerFactory>()
-    ));
-    builder.Services.AddSingleton<TailingManager>(sp => new TailingManager(
-      sp.GetRequiredService<IStateProvider>(),
-      builder.Configuration.GetSection("Plugins").Get<List<PluginSettings>>() ?? [],
-      sp.GetRequiredService<ILoggerFactory>(),
-      sp.GetRequiredService<IOptions<IngesterSettings>>().Value
+      sp.GetRequiredService<IStateProvider>()
     ));
     builder.Services.AddSingleton<DataSink>(sp => new DataSink(
       sp.GetRequiredService<ILogger<DataSink>>(),
@@ -87,6 +81,8 @@ public class Program
 
     // Enable Windows Service
     builder.Services.AddWindowsService(options => options.ServiceName = "LogTapestry Ingester");
+
+    builder.Services.AddSingleton<StateWriterService>();
 
     var host = builder.Build();
 

@@ -8,6 +8,8 @@ namespace LogTapestry.Core
     Task RemoveTrackedFileAsync(ulong fileId, long volumeSerial);
     Task<Dictionary<ulong, TrackedFileInfo>> GetAllTrackedFilesAsync();
     Task<string?> GetFieldTypeAsync(string fieldName);
+    // New batch update method for the worker pool model
+    Task UpdateTrackedFilesBatchAsync(PositionUpdate[] updates);
     // Schema registry methods can be added here as needed
     bool CheckHealth();
   }

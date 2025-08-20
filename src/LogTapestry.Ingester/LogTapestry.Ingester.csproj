@@ -23,6 +23,7 @@
     <PackageReference Include="System.CommandLine" Version="2.0.0-beta7.25380.108" />
     <PackageReference Include="System.Threading.Channels" Version="9.0.8" />
     <PackageReference Include="Ulid" Version="1.4.1" />
+    <PackageReference Include="Open.ChannelExtensions" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
