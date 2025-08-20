@@ -18,7 +18,6 @@ namespace LogTapestry.Ingester
     private readonly LiveStateService _liveStateService;
     private readonly IOptions<LogTapestrySettings> _settings;
     private readonly List<PluginSettings> _pluginSettings;
-    private readonly Matcher _matcher;
 
     // Parser type mapping: maps plugin.Type to parser factory
     private readonly ILoggerFactory _loggerFactory;
@@ -28,6 +27,8 @@ namespace LogTapestry.Ingester
       new Dictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>>(StringComparer.OrdinalIgnoreCase) {
         ["regex"] = RegexParserFactory
       };
+
+    private readonly List<(PluginSettings Plugin, Matcher Matcher)> _pluginMatchers;
 
     public FileReader(
       ILogger<FileReader> logger,
@@ -40,12 +41,13 @@ namespace LogTapestry.Ingester
       _settings = settings;
       _pluginSettings = settings.Value.Plugins;
       _loggerFactory = loggerFactory;
-
-      // Create matcher for plugin include/exclude patterns
-      _matcher = new Matcher();
+      // Precompute matchers for each plugin
+      _pluginMatchers = new List<(PluginSettings, Matcher)>();
       foreach (var plugin in _pluginSettings) {
-        _matcher.AddIncludePatterns(plugin.IncludePatterns);
-        _matcher.AddExcludePatterns(plugin.ExcludePatterns);
+        var matcher = new Matcher();
+        matcher.AddIncludePatterns(plugin.IncludePatterns);
+        matcher.AddExcludePatterns(plugin.ExcludePatterns);
+        _pluginMatchers.Add((plugin, matcher));
       }
     }
 
@@ -167,15 +169,17 @@ namespace LogTapestry.Ingester
       // read at most maximumNumberOfLines lines from the file stream
       // this is a helper method to read lines in chunks
       var buffer = new List<string>();
-      using (var sr = new StreamReader(fs, leaveOpen: true)) {
-        string? line;
-        while ((line = await sr.ReadLineAsync(token)) != null) {
-          buffer.Add(line);
-          if (buffer.Count >= maximumNumberOfLines) {
-            yield return (buffer, fs.Position);
-            buffer.Clear();
-          }
+      using var sr = new StreamReader(fs, leaveOpen: true);
+      string? line;
+      while ((line = await sr.ReadLineAsync(token)) != null) {
+        buffer.Add(line);
+        if (buffer.Count >= maximumNumberOfLines) {
+          yield return (buffer, fs.Position);
+          buffer.Clear();
         }
+      }
+      if(buffer.Count > 0) {
+        yield return (buffer, fs.Position);
       }
     }
 
@@ -200,17 +204,11 @@ namespace LogTapestry.Ingester
     {
       // Use file name for matching (same logic as original TailingManager)
       var relPath = Path.GetFileName(filePath);
-
-      foreach (var plugin in _pluginSettings) {
-        var pluginMatcher = new Matcher();
-        pluginMatcher.AddIncludePatterns(plugin.IncludePatterns);
-        pluginMatcher.AddExcludePatterns(plugin.ExcludePatterns);
-
-        if (pluginMatcher.Match(relPath).HasMatches) {
+      foreach (var (plugin, matcher) in _pluginMatchers) {
+        if (matcher.Match(relPath).HasMatches) {
           return plugin;
         }
       }
-
       return null;
     }
 

@@ -2,6 +2,7 @@ using LogTapestry.Core;
 
 using Microsoft.Extensions.Logging;
 
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
@@ -14,7 +15,7 @@ namespace LogTapestry.Ingester
   {
     private readonly ILogger<PriorityMonitor> _logger;
     private readonly Channel<FileEvent> _outputChannel;
-    private readonly HashSet<(ulong FileId, long VolumeSerial)> _seenEvents = new();
+    private readonly ConcurrentBag<(ulong FileId, long VolumeSerial)> _seenEvents = new();
 
     public PriorityMonitor(ILogger<PriorityMonitor> logger)
     {
