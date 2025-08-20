@@ -1,9 +1,7 @@
 // LogTapestry.Ingester/DirectoryMonitor.cs
 using LogTapestry.Core;
-
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-
 using System.Threading.Channels;
 
 namespace LogTapestry.Ingester
@@ -28,17 +26,17 @@ namespace LogTapestry.Ingester
     public DirectoryMonitor(
       ILogger<DirectoryMonitor> logger,
       IOptions<IngesterSettings> options,
-      IStateProvider stateProvider)
+      IStateProvider stateProvider,
+      PriorityMonitor priorityMonitor,
+      InitialScanProducer initialScanProducer,
+      WatcherProducer watcherProducer)
     {
       _logger = logger;
       _settings = options.Value;
       _stateProvider = stateProvider;
-
-      // Create specific loggers for each component
-      var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
-      _priorityMonitor = new PriorityMonitor(loggerFactory.CreateLogger<PriorityMonitor>());
-      _initialScanProducer = new InitialScanProducer(loggerFactory.CreateLogger<InitialScanProducer>(), options, stateProvider);
-      _watcherProducer = new WatcherProducer(loggerFactory.CreateLogger<WatcherProducer>(), options);
+      _priorityMonitor = priorityMonitor;
+      _initialScanProducer = initialScanProducer;
+      _watcherProducer = watcherProducer;
     }
 
     /// <summary>

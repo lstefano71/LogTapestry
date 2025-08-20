@@ -83,11 +83,27 @@ public class Program
     builder.Services.AddSingleton<IStateProvider>(sp => sp.GetRequiredService<SqliteStateProvider>());
     builder.Services.AddSingleton<LiveStateService>();
 
-    // Register directory monitor
+    // Register PriorityMonitor, InitialScanProducer, and WatcherProducer for DI
+    builder.Services.AddSingleton<PriorityMonitor>(sp =>
+        new PriorityMonitor(sp.GetRequiredService<ILogger<PriorityMonitor>>()));
+    builder.Services.AddSingleton<InitialScanProducer>(sp =>
+        new InitialScanProducer(
+            sp.GetRequiredService<ILogger<InitialScanProducer>>(),
+            sp.GetRequiredService<IOptions<IngesterSettings>>(),
+            sp.GetRequiredService<IStateProvider>()));
+    builder.Services.AddSingleton<WatcherProducer>(sp =>
+        new WatcherProducer(
+            sp.GetRequiredService<ILogger<WatcherProducer>>(),
+            sp.GetRequiredService<IOptions<IngesterSettings>>()));
+
+    // Register directory monitor with injected dependencies
     builder.Services.AddSingleton<DirectoryMonitor>(sp => new DirectoryMonitor(
-      sp.GetRequiredService<ILogger<DirectoryMonitor>>(),
-      sp.GetRequiredService<IOptions<IngesterSettings>>(),
-      sp.GetRequiredService<IStateProvider>()
+        sp.GetRequiredService<ILogger<DirectoryMonitor>>(),
+        sp.GetRequiredService<IOptions<IngesterSettings>>(),
+        sp.GetRequiredService<IStateProvider>(),
+        sp.GetRequiredService<PriorityMonitor>(),
+        sp.GetRequiredService<InitialScanProducer>(),
+        sp.GetRequiredService<WatcherProducer>()
     ));
 
     // Register checkpointing data sink
