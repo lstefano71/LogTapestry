@@ -1,10 +1,12 @@
-﻿namespace LogTapestry.Core.Tests;
+﻿﻿using System.Text;
+
+namespace LogTapestry.Core.Tests;
 
 [TestClass]
-public sealed class RegexLogParserTests
+public sealed class LogParserTests
 {
   [TestMethod]
-  public void RegexLogParser_ParsesSimpleLogLine()
+  public async Task RegexLogParser_ParsesSimpleLogLine()
   {
     var pluginSettings = new PluginSettings {
       Type = "regex",
@@ -20,18 +22,112 @@ public sealed class RegexLogParserTests
       }
     };
 
-    var parser = new RegexLogParser(pluginSettings, "test.log");
-    var lines = new[] { "2025-08-18T16:00:01Z INFO User login succeeded user_id=101 username=\"alice\"" };
-    var results = parser.Parse(lines).ToList();
-    var flushResult = parser.Flush();
-    if (flushResult != null) results.Add(flushResult);
+    await using var parser = new RegexLogParser(pluginSettings, "test.log");
+    var logData = "2025-08-18T16:00:01Z INFO User login succeeded user_id=101 username=\"alice\"\n";
+    var stream = new MemoryStream(Encoding.UTF8.GetBytes(logData));
+    
+    var result = await parser.ParseNextChunkAsync(stream, CancellationToken.None);
+    
+    Assert.AreEqual(1, result.SuccessfulEntries.Count);
+    Assert.AreEqual(0, result.Failures.Count);
+    
+    var entry = result.SuccessfulEntries[0];
+    Assert.AreEqual("INFO", entry.Level);
+    Assert.AreEqual(101L, entry.Fields["user_id"]);
+    Assert.AreEqual("test.log", entry.Source);
+  }
 
-    Assert.AreEqual(1, results.Count);
-    var result = results[0];
-    Assert.IsTrue(result.IsSuccess);
-    Assert.IsNotNull(result.Entry);
-    Assert.AreEqual("INFO", result.Entry.Level);
-    Assert.AreEqual(101L, result.Entry.Fields["user_id"]);
-    Assert.AreEqual("test.log", result.Entry.Source);
+  [TestMethod]
+  public async Task CsvLogParser_ParsesSimpleCsvRecord()
+  {
+    var pluginSettings = new PluginSettings {
+      Type = "csv",
+      Name = "test_csv",
+      IncludePatterns = ["*.csv"],
+      CsvConfig = new CsvPluginConfig {
+        HasHeader = true,
+        Delimiter = ",",
+        TimestampColumn = "timestamp",
+        LevelColumn = "level",
+        MessageColumn = "message",
+        TimestampFormat = "yyyy-MM-dd HH:mm:ss",
+        FieldMappings = [
+          new CsvFieldMapping { ColumnName = "user_id", FieldName = "user_id", Type = "long" },
+          new CsvFieldMapping { ColumnName = "session_id", FieldName = "session_id", Type = "string" }
+        ]
+      }
+    };
+
+    await using var parser = new CsvLogParser(pluginSettings, "test.csv");
+    var csvData = "timestamp,level,message,user_id,session_id\n2025-08-18 16:00:01,INFO,User login succeeded,101,abc123\n";
+    var stream = new MemoryStream(Encoding.UTF8.GetBytes(csvData));
+    
+    var result = await parser.ParseNextChunkAsync(stream, CancellationToken.None);
+    
+    Assert.AreEqual(1, result.SuccessfulEntries.Count);
+    Assert.AreEqual(0, result.Failures.Count);
+    
+    var entry = result.SuccessfulEntries[0];
+    Assert.AreEqual("INFO", entry.Level);
+    Assert.AreEqual("User login succeeded", entry.Message);
+    Assert.AreEqual(101L, entry.Fields["user_id"]);
+    Assert.AreEqual("abc123", entry.Fields["session_id"]);
+    Assert.AreEqual("test.csv", entry.Source);
+  }
+
+  [TestMethod]
+  public async Task CsvLogParser_HandlesQuotedFields()
+  {
+    var pluginSettings = new PluginSettings {
+      Type = "csv",
+      Name = "test_csv",
+      IncludePatterns = ["*.csv"],
+      CsvConfig = new CsvPluginConfig {
+        HasHeader = true,
+        Delimiter = ",",
+        MessageColumn = "message",
+        FieldMappings = [
+          new CsvFieldMapping { ColumnName = "description", FieldName = "description", Type = "string" }
+        ]
+      }
+    };
+
+    await using var parser = new CsvLogParser(pluginSettings, "test.csv");
+    var csvData = "message,description\n\"Error occurred\",\"This is a \"\"quoted\"\" description\"\n";
+    var stream = new MemoryStream(Encoding.UTF8.GetBytes(csvData));
+    
+    var result = await parser.ParseNextChunkAsync(stream, CancellationToken.None);
+    
+    Assert.AreEqual(1, result.SuccessfulEntries.Count);
+    var entry = result.SuccessfulEntries[0];
+    Assert.AreEqual("Error occurred", entry.Message);
+    Assert.AreEqual("This is a \"quoted\" description", entry.Fields["description"]);
+  }
+
+  [TestMethod]
+  public async Task CsvLogParser_HandlesMultipleRecords()
+  {
+    var pluginSettings = new PluginSettings {
+      Type = "csv",
+      Name = "test_csv",
+      IncludePatterns = ["*.csv"],
+      CsvConfig = new CsvPluginConfig {
+        HasHeader = true,
+        LevelColumn = "level",
+        MessageColumn = "message",
+        MaxRecordsPerChunk = 10
+      }
+    };
+
+    await using var parser = new CsvLogParser(pluginSettings, "test.csv");
+    var csvData = "level,message\nINFO,First log\nWARN,Second log\nERROR,Third log\n";
+    var stream = new MemoryStream(Encoding.UTF8.GetBytes(csvData));
+    
+    var result = await parser.ParseNextChunkAsync(stream, CancellationToken.None);
+    
+    Assert.AreEqual(3, result.SuccessfulEntries.Count);
+    Assert.AreEqual("INFO", result.SuccessfulEntries[0].Level);
+    Assert.AreEqual("WARN", result.SuccessfulEntries[1].Level);
+    Assert.AreEqual("ERROR", result.SuccessfulEntries[2].Level);
   }
 }

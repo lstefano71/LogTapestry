@@ -41,6 +41,7 @@ public class PluginSettings
   public List<string> IncludePatterns { get; set; } = [];
   public List<string> ExcludePatterns { get; set; } = [];
   public RegexPluginConfig Config { get; set; } = new();
+  public CsvPluginConfig CsvConfig { get; set; } = new();
 }
 
 public class RegexPluginConfig
@@ -57,4 +58,27 @@ public class FieldRegex
   public string Regex { get; set; } = "";
   public string FieldName { get; set; } = "";
   public string Type { get; set; } = "string"; // "long", "double", etc.
+}
+
+public class CsvPluginConfig
+{
+  public bool HasHeader { get; set; } = true;
+  public string Delimiter { get; set; } = ",";
+  public string QuoteChar { get; set; } = "\"";
+  public string EscapeChar { get; set; } = "\"";
+  public List<CsvFieldMapping> FieldMappings { get; set; } = [];
+  public string TimestampColumn { get; set; } = "";
+  public string LevelColumn { get; set; } = "";
+  public string MessageColumn { get; set; } = "";
+  public string TimestampFormat { get; set; } = "";
+  public bool TimestampIsUtc { get; set; } = false;
+  public int MaxRecordsPerChunk { get; set; } = 1000;
+}
+
+public class CsvFieldMapping
+{
+  public string ColumnName { get; set; } = "";
+  public string FieldName { get; set; } = "";
+  public string Type { get; set; } = "string"; // "long", "double", "datetime", etc.
+  public bool IsRequired { get; set; } = false;
 }

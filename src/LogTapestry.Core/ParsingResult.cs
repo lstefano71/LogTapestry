@@ -18,4 +18,18 @@ namespace LogTapestry.Core
     public static ParsingResult Failure(string errorMessage, string unparseableText, string source) =>
         new(false, null, errorMessage, unparseableText, source);
   }
+
+  /// <summary>
+  /// The result of a single parsing iteration.
+  /// </summary>
+  public record ParseChunkResult(
+      IReadOnlyList<LogEntry> SuccessfulEntries,
+      IReadOnlyList<ParsingFailure> Failures
+      // BytesConsumed is no longer needed here, as the stream position is the source of truth.
+  );
+
+  /// <summary>
+  /// Represents a parsing failure with detailed error information.
+  /// </summary>
+  public record ParsingFailure(string ErrorMessage, string Source, string? ProblematicText = null);
 }

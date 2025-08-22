@@ -23,9 +23,12 @@ namespace LogTapestry.Ingester
     private readonly ILoggerFactory _loggerFactory;
     private static readonly Func<PluginSettings, string, ILoggerFactory, ILogParser> RegexParserFactory =
       (settings, filePath, loggerFactory) => new RegexLogParser(settings, filePath, loggerFactory.CreateLogger<RegexLogParser>());
+    private static readonly Func<PluginSettings, string, ILoggerFactory, ILogParser> CsvParserFactory =
+      (settings, filePath, loggerFactory) => new CsvLogParser(settings, filePath, loggerFactory.CreateLogger<CsvLogParser>());
     private static readonly IReadOnlyDictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>> ParserFactories =
       new Dictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>>(StringComparer.OrdinalIgnoreCase) {
-        ["regex"] = RegexParserFactory
+        ["regex"] = RegexParserFactory,
+        ["csv"] = CsvParserFactory
       };
 
     private readonly List<(PluginSettings Plugin, Matcher Matcher)> _pluginMatchers;
@@ -86,30 +89,46 @@ namespace LogTapestry.Ingester
 
       fs.Seek(position, SeekOrigin.Begin);
 
-      var parser = parserFactory(plugin, request.FilePath, _loggerFactory);
+      await using var parser = parserFactory(plugin, request.FilePath, _loggerFactory);
       var successfulEntries = new List<LogEntry>();
       var currentPosition = position;
       var emittedEntries = 0;
       var maxEntriesPerBlock = _settings.Value.Ingester.MaxEntriesPerDataBlock;
 
-      await foreach (var (buffer, pos) in ReadBlockOfLines(fs, 100, token)) {
-        currentPosition = pos;
-        // Parse line immediately to avoid large buffers
-        var results = parser.Parse(buffer);
-
+      while (!token.IsCancellationRequested)
+      {
+        currentPosition = fs.Position;
+        
+        // Parse next chunk using the new stream-based interface
+        var parseResult = await parser.ParseNextChunkAsync(fs, token);
+        
         // Collect successful parsing results
-        foreach (var result in results) {
-          if (result.IsSuccess && result.Entry != null) {
-            successfulEntries.Add(result.Entry);
-            _logger.LogTrace("Parsed log entry from {FilePath}", request.FilePath);
-          } else {
-            _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}",
-              result.ErrorMessage, result.Source);
-          }
+        foreach (var entry in parseResult.SuccessfulEntries)
+        {
+          successfulEntries.Add(entry);
+          _logger.LogTrace("Parsed log entry from {FilePath}", request.FilePath);
         }
+        
+        // Log parsing failures
+        foreach (var failure in parseResult.Failures)
+        {
+          _logger.LogWarning("Log parsing failed: {ErrorMessage}. Source: {Source}. Text: {Text}",
+            failure.ErrorMessage, failure.Source, failure.ProblematicText);
+        }
+        
+        // Check if we have any entries or if we reached end of file
+        if (parseResult.SuccessfulEntries.Count == 0 && parseResult.Failures.Count == 0)
+        {
+          // No more data to process
+          break;
+        }
+        
+        // Update current position after parsing
+        currentPosition = fs.Position;
 
         // Yield DataBlock if we've reached the entry limit
-        if (successfulEntries.Count >= maxEntriesPerBlock) {
+        if (successfulEntries.Count >= maxEntriesPerBlock)
+        {
           var dataBlock = new DataBlock(
             FileId: request.FileId,
             VolumeSerial: request.VolumeSerial,
@@ -133,18 +152,6 @@ namespace LogTapestry.Ingester
             PositionUpdateMode.InMemoryOnly
           );
           successfulEntries.Clear();
-        }
-      }
-
-      // Flush the parser to emit any buffered result (e.g., last line/event)
-      var flushResult = parser.Flush();
-      if (flushResult != null) {
-        if (flushResult.IsSuccess && flushResult.Entry != null) {
-          successfulEntries.Add(flushResult.Entry);
-          _logger.LogTrace("Parsed flushed log entry from {FilePath}", request.FilePath);
-        } else {
-          _logger.LogWarning("Log parsing failed on flush: {ErrorMessage}. Source: {Source}",
-            flushResult.ErrorMessage, flushResult.Source);
         }
       }
 
@@ -179,8 +186,10 @@ namespace LogTapestry.Ingester
       }
     }
     /// <summary>
-    /// Read the next block of lines from the file stream.
+    /// Legacy method - kept for reference but no longer used.
+    /// The new stream-based parsers handle their own buffering.
     /// </summary>
+    [Obsolete("Use stream-based parsing instead")]
     private static async IAsyncEnumerable<(IList<string>, long)> ReadBlockOfLines(FileStream fs, int maximumNumberOfLines,
       [EnumeratorCancellation] CancellationToken token)
     {
