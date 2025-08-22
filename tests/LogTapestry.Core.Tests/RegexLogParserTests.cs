@@ -1,4 +1,4 @@
-﻿﻿using System.Text;
+﻿﻿﻿using System.Text;
 
 namespace LogTapestry.Core.Tests;
 
@@ -129,5 +129,41 @@ public sealed class LogParserTests
     Assert.AreEqual("INFO", result.SuccessfulEntries[0].Level);
     Assert.AreEqual("WARN", result.SuccessfulEntries[1].Level);
     Assert.AreEqual("ERROR", result.SuccessfulEntries[2].Level);
+  }
+
+  [TestMethod]
+  public async Task CsvLogParser_HandlesMultiLineFields()
+  {
+    var pluginSettings = new PluginSettings {
+      Type = "csv",
+      Name = "test_csv",
+      IncludePatterns = ["*.csv"],
+      CsvConfig = new CsvPluginConfig {
+        HasHeader = true,
+        Delimiter = ",",
+        MessageColumn = "message",
+        FieldMappings = [
+          new CsvFieldMapping { ColumnName = "description", FieldName = "description", Type = "string" }
+        ]
+      }
+    };
+
+    await using var parser = new CsvLogParser(pluginSettings, "test.csv");
+    // CSV with multi-line field containing actual newlines
+    var csvData = "message,description\n\"Single line\",\"This is a\nmulti-line\ndescription\"\n\"Another record\",\"Simple description\"\n";
+    var stream = new MemoryStream(Encoding.UTF8.GetBytes(csvData));
+    
+    var result = await parser.ParseNextChunkAsync(stream, CancellationToken.None);
+    
+    Assert.AreEqual(2, result.SuccessfulEntries.Count);
+    Assert.AreEqual(0, result.Failures.Count);
+    
+    var firstEntry = result.SuccessfulEntries[0];
+    Assert.AreEqual("Single line", firstEntry.Message);
+    Assert.AreEqual("This is a\nmulti-line\ndescription", firstEntry.Fields["description"]);
+    
+    var secondEntry = result.SuccessfulEntries[1];
+    Assert.AreEqual("Another record", secondEntry.Message);
+    Assert.AreEqual("Simple description", secondEntry.Fields["description"]);
   }
 }

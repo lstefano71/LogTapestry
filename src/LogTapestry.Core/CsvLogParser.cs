@@ -10,17 +10,14 @@ namespace LogTapestry.Core
   public class CsvLogParser : BaseLogParser
   {
     private readonly CsvPluginConfig _csvConfig;
-    private readonly StringBuilder _lineBuffer;
     private bool _headerProcessed;
     private string[]? _headers;
     private readonly Dictionary<string, int> _columnIndexMap;
-    private StreamReader? _streamReader;
 
     public CsvLogParser(PluginSettings settings, string sourceFile, ILogger? logger = null) 
       : base(settings, sourceFile, logger)
     {
       _csvConfig = settings.CsvConfig;
-      _lineBuffer = new StringBuilder();
       _headerProcessed = false;
       _columnIndexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     }
@@ -32,31 +29,25 @@ namespace LogTapestry.Core
       var recordsProcessed = 0;
       var maxRecords = _csvConfig.MaxRecordsPerChunk;
 
-      // Initialize stream reader if not already done
-      if (_streamReader == null)
-      {
-        _streamReader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
-      }
-
       try
       {
         while (recordsProcessed < maxRecords && !token.IsCancellationRequested)
         {
-          var line = await _streamReader.ReadLineAsync(token);
-          if (line == null)
+          var record = await ReadNextCsvRecordAsync(stream, token);
+          if (record == null)
           {
-            // No more complete lines available
+            // No more complete records available
             break;
           }
 
           if (!_headerProcessed && _csvConfig.HasHeader)
           {
-            ProcessHeader(line);
+            ProcessHeader(record);
             _headerProcessed = true;
             continue; // Skip header row
           }
 
-          var parseResult = ParseCsvRecord(line);
+          var parseResult = ParseCsvRecord(record);
           if (parseResult.entry != null)
           {
             successfulEntries.Add(parseResult.entry);
@@ -78,10 +69,101 @@ namespace LogTapestry.Core
       return new ParseChunkResult(successfulEntries, failures);
     }
 
+    private async Task<string?> ReadNextCsvRecordAsync(Stream stream, CancellationToken token)
+    {
+      var record = new StringBuilder();
+      bool inQuotes = false;
+      bool foundCompleteRecord = false;
+
+      while (!foundCompleteRecord && !token.IsCancellationRequested)
+      {
+        // Read more data into buffer if needed
+        if (BufferLength == 0)
+        {
+          var bytesRead = await ReadIntoBufferAsync(stream, token);
+          if (bytesRead == 0)
+          {
+            // End of stream - return any remaining data as a record
+            if (record.Length > 0)
+            {
+              return record.ToString();
+            }
+            return null;
+          }
+        }
+
+        // Process buffer byte by byte
+        int startPos = 0;
+        for (int i = 0; i < BufferLength; i++)
+        {
+          char c = (char)Buffer[i];
+
+          if (c == _csvConfig.QuoteChar[0])
+          {
+            inQuotes = !inQuotes;
+          }
+          else if (!inQuotes && (c == '\n'))
+          {
+            // Found end of record outside quotes
+            
+            // Add the data up to (but not including) the newline
+            if (i > startPos)
+            {
+              record.Append(BufferToString(startPos, i - startPos));
+            }
+            
+            // Remove processed data from buffer (including the newline)
+            ConsumeBuffer(i + 1);
+            
+            foundCompleteRecord = true;
+            break;
+          }
+          else if (!inQuotes && c == '\r')
+          {
+            // Handle \r\n or standalone \r
+            if (i + 1 < BufferLength && Buffer[i + 1] == (byte)'\n')
+            {
+              // \r\n sequence - add data up to \r and consume both \r\n
+              if (i > startPos)
+              {
+                record.Append(BufferToString(startPos, i - startPos));
+              }
+              
+              ConsumeBuffer(i + 2);
+              foundCompleteRecord = true;
+              break;
+            }
+            else
+            {
+              // Standalone \r - treat as record terminator
+              if (i > startPos)
+              {
+                record.Append(BufferToString(startPos, i - startPos));
+              }
+              
+              ConsumeBuffer(i + 1);
+              foundCompleteRecord = true;
+              break;
+            }
+          }
+        }
+
+        // If we haven't found a complete record, add all remaining buffer data to record
+        if (!foundCompleteRecord)
+        {
+          if (BufferLength > startPos)
+          {
+            record.Append(BufferToString(startPos, BufferLength - startPos));
+          }
+          ConsumeBuffer(BufferLength); // Clear the entire buffer
+        }
+      }
+
+      return foundCompleteRecord ? record.ToString() : null;
+    }
+
     public override async ValueTask DisposeAsync()
     {
-      _streamReader?.Dispose();
-      _streamReader = null;
       await base.DisposeAsync();
     }
 

@@ -187,21 +187,17 @@ namespace LogTapestry.Core
           linesProcessed++;
         }
 
-        // Process any remaining buffered entry if we're at end of chunk
-        if (linesProcessed >= maxLinesPerChunk || await stream.ReadAsync(new byte[1], token) == 0)
+        // Process any remaining buffered entry at end of chunk
+        var flushResult = FlushBufferedEntry();
+        if (flushResult != null)
         {
-          stream.Seek(-1, SeekOrigin.Current); // Put back the peek byte
-          var flushResult = FlushBufferedEntry();
-          if (flushResult != null)
+          if (flushResult.IsSuccess && flushResult.Entry != null)
           {
-            if (flushResult.IsSuccess && flushResult.Entry != null)
-            {
-              successfulEntries.Add(flushResult.Entry);
-            }
-            else
-            {
-              failures.Add(new ParsingFailure(flushResult.ErrorMessage ?? "Unknown error", SourceFile, flushResult.UnparseableText));
-            }
+            successfulEntries.Add(flushResult.Entry);
+          }
+          else
+          {
+            failures.Add(new ParsingFailure(flushResult.ErrorMessage ?? "Unknown error", SourceFile, flushResult.UnparseableText));
           }
         }
       }
@@ -216,38 +212,90 @@ namespace LogTapestry.Core
 
     private async Task<string?> ReadNextCompleteLineAsync(Stream stream, CancellationToken token)
     {
-      var buffer = new byte[1024];
-      
       while (!token.IsCancellationRequested)
       {
-        var bytesRead = await stream.ReadAsync(buffer, token);
-        if (bytesRead == 0)
+        // Read more data into buffer if needed
+        if (BufferLength == 0)
         {
-          // End of stream
-          if (_lineBuffer.Length > 0)
+          var bytesRead = await ReadIntoBufferAsync(stream, token);
+          if (bytesRead == 0)
           {
-            var remainingLine = _lineBuffer.ToString();
-            _lineBuffer.Clear();
-            return remainingLine;
+            // End of stream - return any remaining data in line buffer
+            if (_lineBuffer.Length > 0)
+            {
+              var remainingLine = _lineBuffer.ToString();
+              _lineBuffer.Clear();
+              return remainingLine;
+            }
+            return null;
           }
-          return null;
         }
 
-        var text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-        
-        foreach (char c in text)
+        // Process buffer byte by byte to find complete lines
+        int startPos = 0;
+        for (int i = 0; i < BufferLength; i++)
         {
+          char c = (char)Buffer[i];
+
           if (c == '\n')
           {
+            // Found end of line
+            
+            // Add the data up to (but not including) the newline to line buffer
+            if (i > startPos)
+            {
+              _lineBuffer.Append(BufferToString(startPos, i - startPos));
+            }
+            
+            // Get the complete line
             var completeLine = _lineBuffer.ToString();
             _lineBuffer.Clear();
+            
+            // Remove processed data from buffer (including the newline)
+            ConsumeBuffer(i + 1);
+            
             return completeLine;
           }
-          else if (c != '\r') // Skip carriage returns
+          else if (c == '\r')
           {
-            _lineBuffer.Append(c);
+            // Handle \r\n or standalone \r
+            if (i + 1 < BufferLength && Buffer[i + 1] == (byte)'\n')
+            {
+              // \r\n sequence - add data up to \r and consume both \r\n
+              if (i > startPos)
+              {
+                _lineBuffer.Append(BufferToString(startPos, i - startPos));
+              }
+              
+              var completeLine = _lineBuffer.ToString();
+              _lineBuffer.Clear();
+              
+              ConsumeBuffer(i + 2);
+              return completeLine;
+            }
+            else
+            {
+              // Standalone \r - treat as line terminator
+              if (i > startPos)
+              {
+                _lineBuffer.Append(BufferToString(startPos, i - startPos));
+              }
+              
+              var completeLine = _lineBuffer.ToString();
+              _lineBuffer.Clear();
+              
+              ConsumeBuffer(i + 1);
+              return completeLine;
+            }
           }
         }
+
+        // If we haven't found a complete line, add all remaining buffer data to line buffer
+        if (BufferLength > startPos)
+        {
+          _lineBuffer.Append(BufferToString(startPos, BufferLength - startPos));
+        }
+        ConsumeBuffer(BufferLength); // Clear the entire buffer
       }
 
       return null;
