@@ -8,8 +8,8 @@ using System.Threading.Channels;
 namespace LogTapestry.Ingester
 {
   /// <summary>
-  /// Checkpointing IngesterService using coordinated state update model with consistent hashing.
-  /// Implements atomic data and state persistence to prevent race conditions.
+  /// Multi-sink IngesterService using coordinated state update model with consistent hashing.
+  /// Implements atomic data and state persistence across multiple configurable sinks to prevent race conditions.
   /// Routes file events to processor-specific channels to ensure sequential processing per file.
   /// </summary>
   public class IngesterService(
@@ -17,7 +17,7 @@ namespace LogTapestry.Ingester
     Microsoft.Extensions.Options.IOptions<LogTapestrySettings> options,
     DirectoryMonitor directoryMonitor,
     StateWriterService stateWriterService,
-    CheckpointDataSink checkpointDataSink,
+    MultiSinkProcessor multiSinkProcessor,
     FileReader fileReader,
     ConsistentHashRouter hashRouter,
     List<ProcessorChannel> processorChannels,
@@ -27,7 +27,7 @@ namespace LogTapestry.Ingester
     private readonly LogTapestrySettings _settings = options.Value;
     private readonly DirectoryMonitor _directoryMonitor = directoryMonitor;
     private readonly StateWriterService _stateWriterService = stateWriterService;
-    private readonly CheckpointDataSink _checkpointDataSink = checkpointDataSink;
+    private readonly MultiSinkProcessor _multiSinkProcessor = multiSinkProcessor;
     private readonly FileReader _fileReader = fileReader;
     private readonly ConsistentHashRouter _hashRouter = hashRouter;
     private readonly List<ProcessorChannel> _processorChannels = processorChannels; // Injected from DI
@@ -155,11 +155,11 @@ namespace LogTapestry.Ingester
       if (batch.Count == 0) return;
 
       try {
-        // Use checkpointing data sink to ensure atomic data and state persistence
-        await _checkpointDataSink.WriteBatchAndCheckpointStateAsync(batch);
-        _logger.LogInformation("Checkpointed batch of {Count} data blocks", batch.Count);
+        // Use multi-sink processor to ensure atomic data and state persistence across all sinks
+        await _multiSinkProcessor.WriteBatchAndCheckpointStateAsync(batch);
+        _logger.LogInformation("Multi-sink checkpointed batch of {Count} data blocks", batch.Count);
       } catch (Exception ex) {
-        _logger.LogError(ex, "Failed to checkpoint batch of {Count} data blocks", batch.Count);
+        _logger.LogError(ex, "Failed to checkpoint batch of {Count} data blocks with multi-sink processor", batch.Count);
         // In checkpointing model, we don't continue processing on failure
         // The atomic nature means partial failures require investigation
         throw;

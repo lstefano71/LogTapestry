@@ -1,5 +1,7 @@
 // C#
 using LogTapestry.Core;
+using LogTapestry.Core.Interfaces;
+using LogTapestry.Ingester.Sinks;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -131,8 +133,63 @@ public class Program
         sp.GetRequiredService<WatcherProducer>()
     ));
 
-    // Register checkpointing data sink
-    builder.Services.AddSingleton<CheckpointDataSink>();
+    // Register multi-sink processor and its components
+    builder.Services.AddSingleton<SinkFilter>(sp => {
+      var logger = sp.GetRequiredService<ILogger<SinkFilter>>();
+      var settings = sp.GetRequiredService<IOptions<LogTapestrySettings>>().Value;
+      return new SinkFilter(logger, settings.Sinks);
+    });
+    
+    builder.Services.AddSingleton<SinkExecutor>();
+    builder.Services.AddSingleton<CheckpointManager>();
+    
+    // Register individual sinks
+    builder.Services.AddSingleton<IMultiDataSink>(sp => {
+      var logger = sp.GetRequiredService<ILogger<ParquetSink>>();
+      var stateProvider = sp.GetRequiredService<IStateProvider>();
+      var settings = sp.GetRequiredService<IOptions<LogTapestrySettings>>().Value;
+      
+      var parquetConfig = new ParquetSinkConfiguration();
+      if (settings.Sinks.Configurations.TryGetValue("parquet", out var sinkDef)) {
+        parquetConfig = sinkDef.GetSinkConfig<ParquetSinkConfiguration>();
+      }
+      
+      return new ParquetSink(logger, stateProvider, parquetConfig);
+    });
+    
+    // Register OTEL sink if configured
+    builder.Services.AddHttpClient<OtelSink>();
+    builder.Services.AddSingleton<IMultiDataSink>(sp => {
+      var logger = sp.GetRequiredService<ILogger<OtelSink>>();
+      var httpClient = sp.GetRequiredService<HttpClient>();
+      var settings = sp.GetRequiredService<IOptions<LogTapestrySettings>>().Value;
+      
+      var otelConfig = new OtelSinkConfiguration();
+      if (settings.Sinks.Configurations.TryGetValue("otel", out var sinkDef)) {
+        otelConfig = sinkDef.GetSinkConfig<OtelSinkConfiguration>();
+      }
+      
+      return new OtelSink(logger, httpClient, otelConfig);
+    });
+    
+    // Register MultiSinkProcessor
+    builder.Services.AddSingleton<MultiSinkProcessor>(sp => {
+      var logger = sp.GetRequiredService<ILogger<MultiSinkProcessor>>();
+      var liveStateService = sp.GetRequiredService<LiveStateService>();
+      var sinkExecutor = sp.GetRequiredService<SinkExecutor>();
+      var checkpointManager = sp.GetRequiredService<CheckpointManager>();
+      var sinkFilter = sp.GetRequiredService<SinkFilter>();
+      
+      var processor = new MultiSinkProcessor(logger, liveStateService, sinkExecutor, checkpointManager, sinkFilter);
+      
+      // Register all available sinks with the executor
+      var sinks = sp.GetServices<IMultiDataSink>();
+      foreach (var sink in sinks) {
+        sinkExecutor.RegisterSink(sink);
+      }
+      
+      return processor;
+    });
 
     // Register hosted services
     builder.Services.AddHostedService<IngesterService>();

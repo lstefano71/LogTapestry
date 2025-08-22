@@ -4,6 +4,7 @@ public class LogTapestrySettings
 {
   public IngesterSettings Ingester { get; set; } = new();
   public List<PluginSettings> Plugins { get; set; } = [];
+  public SinkConfiguration Sinks { get; set; } = new();
 }
 
 public class IngesterSettings
