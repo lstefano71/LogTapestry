@@ -18,6 +18,10 @@ namespace LogTapestry.Core
         private bool _headerProcessed;
         private string[]? _headers;
         private readonly Dictionary<string, int> _columnIndexMap;
+        private long _lastKnownPosition;
+        private bool _readerExhausted;
+        private int _recordsReadFromBuffer;
+        private long _estimatedBytesPerRecord;
 
         public SepCsvLogParser(PluginSettings settings, string sourceFile, ILogger? logger = null)
         {
@@ -31,6 +35,10 @@ namespace LogTapestry.Core
             _logger = logger;
             _headerProcessed = false;
             _columnIndexMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            _lastKnownPosition = 0;
+            _readerExhausted = false;
+            _recordsReadFromBuffer = 0;
+            _estimatedBytesPerRecord = 0;
 
             _logger?.LogDebug("Initialized SepCsvLogParser for {SourceFile} with delimiter '{Delimiter}'", 
                 _sourceFile, _csvConfig.Delimiter);
@@ -42,31 +50,48 @@ namespace LogTapestry.Core
             var failures = new List<ParsingFailure>();
             var recordsProcessed = 0;
             var maxRecords = _csvConfig.MaxRecordsPerChunk;
+            var totalRecordsRead = 0;
 
             try
             {
                 EnsureReaderInitialized(stream);
                 
-                if (_reader == null)
+                if (_reader == null || _readerExhausted)
                 {
                     return new ParseChunkResult(successfulEntries, failures);
                 }
 
-                while (recordsProcessed < maxRecords && !token.IsCancellationRequested)
+                var initialPosition = _trackingStream?.CurrentPosition ?? 0;
+                var initialStreamPosition = stream.Position;
+
+                // Read rows from the Sep reader
+                while (recordsProcessed < maxRecords && !token.IsCancellationRequested && !_readerExhausted)
                 {
-                    if (!_reader.MoveNext())
+                    try
                     {
-                        // No more records available
+                        if (!_reader.MoveNext())
+                        {
+                            // No more records available
+                            _readerExhausted = true;
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Error reading next CSV record, marking reader as exhausted");
+                        _readerExhausted = true;
+                        failures.Add(CreateFailure($"CSV reading error: {ex.Message}"));
                         break;
                     }
 
                     var row = _reader.Current;
+                    totalRecordsRead++;
                     
                     if (!_headerProcessed && _csvConfig.HasHeader)
                     {
                         ProcessHeader(row);
                         _headerProcessed = true;
-                        continue; // Skip header row
+                        continue; // Skip header row, don't count towards chunk limit
                     }
 
                     var parseResult = ParseCsvRecord(row);
@@ -82,8 +107,60 @@ namespace LogTapestry.Core
                     recordsProcessed++;
                 }
 
-                _logger?.LogTrace("Parsed {RecordCount} records, current position: {Position}", 
-                    recordsProcessed, GetCurrentPosition());
+                // Update position tracking based on actual stream movement and records processed
+                var finalStreamPosition = _trackingStream?.CurrentPosition ?? 0;
+                var streamAdvanced = finalStreamPosition - initialPosition;
+                
+                if (streamAdvanced > 0)
+                {
+                    // Stream actually moved - Sep read new data
+                    _lastKnownPosition = finalStreamPosition;
+                    _recordsReadFromBuffer = 0;
+                    
+                    // Update our bytes per record estimate
+                    if (totalRecordsRead > 0)
+                    {
+                        _estimatedBytesPerRecord = streamAdvanced / totalRecordsRead;
+                    }
+                }
+                else if (recordsProcessed > 0)
+                {
+                    // Stream didn't move but we got records - reading from Sep's buffer
+                    _recordsReadFromBuffer += recordsProcessed;
+                    
+                    // Estimate position advancement based on records read
+                    if (_estimatedBytesPerRecord > 0)
+                    {
+                        var estimatedAdvancement = recordsProcessed * _estimatedBytesPerRecord;
+                        _lastKnownPosition += estimatedAdvancement;
+                    }
+                    else
+                    {
+                        // Fallback: use a more reasonable estimate
+                        // Calculate based on the data we've seen so far
+                        var currentStreamPos = _trackingStream?.CurrentPosition ?? 0;
+                        if (currentStreamPos > 0 && _recordsReadFromBuffer > 0)
+                        {
+                            var avgBytesPerRecord = currentStreamPos / (_recordsReadFromBuffer + recordsProcessed);
+                            _lastKnownPosition = Math.Min(_lastKnownPosition + (recordsProcessed * avgBytesPerRecord), currentStreamPos);
+                        }
+                        else
+                        {
+                            // Very basic fallback
+                            _lastKnownPosition += recordsProcessed * 15; // Assume 15 bytes per record minimum
+                        }
+                    }
+                    
+                    // Ensure we don't exceed the actual stream position
+                    var actualStreamPos = _trackingStream?.CurrentPosition ?? 0;
+                    if (_lastKnownPosition > actualStreamPos)
+                    {
+                        _lastKnownPosition = actualStreamPos;
+                    }
+                }
+
+                _logger?.LogTrace("Parsed {RecordCount} records, stream advanced: {StreamAdvanced}, current position: {Position}, reader exhausted: {Exhausted}", 
+                    recordsProcessed, streamAdvanced, GetCurrentPosition(), _readerExhausted);
             }
             catch (Exception ex)
             {
@@ -100,7 +177,15 @@ namespace LogTapestry.Core
         /// </summary>
         public long GetCurrentPosition()
         {
-            return _trackingStream?.CurrentPosition ?? 0;
+            // Use the most accurate position available
+            if (_trackingStream != null)
+            {
+                var streamPosition = _trackingStream.CurrentPosition;
+                // Return the greater of stream position and last known position
+                // to handle cases where Sep buffering affects position reporting
+                return Math.Max(streamPosition, _lastKnownPosition);
+            }
+            return _lastKnownPosition;
         }
 
         /// <summary>
@@ -125,28 +210,47 @@ namespace LogTapestry.Core
 
             // Wrap the stream with our position tracking stream
             _trackingStream = new PositionTrackingStream(stream);
+            _lastKnownPosition = _trackingStream.CurrentPosition;
 
             _logger?.LogDebug("Initializing Sep reader from position {Position}", _trackingStream.CurrentPosition);
 
-            // Create the Sep reader with tracking stream
-            _reader = Sep.Reader(opts => opts with 
+            try
             {
-                HasHeader = _csvConfig.HasHeader,
-                Sep = new Sep(_csvConfig.Delimiter[0])
-            })
-            .From(_trackingStream);
+                // Create the Sep reader with tracking stream
+                _reader = Sep.Reader(opts => opts with 
+                {
+                    HasHeader = _csvConfig.HasHeader,
+                    Sep = new Sep(_csvConfig.Delimiter[0]),
+                    Unescape = true // Enable quote unescaping for exact quote handling match
+                })
+                .From(_trackingStream);
 
-            // If we have a header and haven't processed it yet, we need to handle it
-            if (_csvConfig.HasHeader && !_headerProcessed)
+                // If we have a header and haven't processed it yet, we need to handle it
+                if (_csvConfig.HasHeader && !_headerProcessed)
+                {
+                    // The reader will handle the header automatically if HasHeader is true
+                    // We just need to track when we've seen it
+                    try
+                    {
+                        _headers = _reader.Header.ColNames.ToArray();
+                        BuildColumnIndexMap();
+                        _headerProcessed = true;
+                        
+                        _logger?.LogDebug("Processed CSV header with {ColumnCount} columns: {Headers}", 
+                            _headers.Length, string.Join(", ", _headers));
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "Failed to process CSV header, will handle manually during parsing");
+                        _headerProcessed = false;
+                    }
+                }
+            }
+            catch (Exception ex)
             {
-                // The reader will handle the header automatically if HasHeader is true
-                // We just need to track when we've seen it
-                _headers = _reader.Header.ColNames.ToArray();
-                BuildColumnIndexMap();
-                _headerProcessed = true;
-                
-                _logger?.LogDebug("Processed CSV header with {ColumnCount} columns: {Headers}", 
-                    _headers.Length, string.Join(", ", _headers));
+                _logger?.LogError(ex, "Failed to initialize Sep reader");
+                _readerExhausted = true;
+                throw;
             }
         }
 
@@ -264,13 +368,24 @@ namespace LogTapestry.Core
                 return "INFO";
             }
 
-            if (!_columnIndexMap.TryGetValue(_csvConfig.LevelColumn, out int columnIndex) || 
-                columnIndex >= row.ColCount)
+            // Handle numeric column references when no header
+            if (!_csvConfig.HasHeader && int.TryParse(_csvConfig.LevelColumn, out int columnIndex))
+            {
+                if (columnIndex >= 0 && columnIndex < row.ColCount)
+                {
+                    return row[columnIndex].ToString() ?? "INFO";
+                }
+                return "INFO";
+            }
+
+            // Handle named column references
+            if (!_columnIndexMap.TryGetValue(_csvConfig.LevelColumn, out int namedColumnIndex) || 
+                namedColumnIndex >= row.ColCount)
             {
                 return "INFO";
             }
 
-            return row[columnIndex].ToString() ?? "INFO";
+            return row[namedColumnIndex].ToString() ?? "INFO";
         }
 
         private string ExtractMessage(SepReader.Row row)
@@ -281,13 +396,24 @@ namespace LogTapestry.Core
                 return string.Join(_csvConfig.Delimiter, GetRowValues(row));
             }
 
-            if (!_columnIndexMap.TryGetValue(_csvConfig.MessageColumn, out int columnIndex) || 
-                columnIndex >= row.ColCount)
+            // Handle numeric column references when no header
+            if (!_csvConfig.HasHeader && int.TryParse(_csvConfig.MessageColumn, out int columnIndex))
+            {
+                if (columnIndex >= 0 && columnIndex < row.ColCount)
+                {
+                    return row[columnIndex].ToString() ?? "";
+                }
+                return string.Join(_csvConfig.Delimiter, GetRowValues(row));
+            }
+
+            // Handle named column references
+            if (!_columnIndexMap.TryGetValue(_csvConfig.MessageColumn, out int namedColumnIndex) || 
+                namedColumnIndex >= row.ColCount)
             {
                 return string.Join(_csvConfig.Delimiter, GetRowValues(row));
             }
 
-            return row[columnIndex].ToString() ?? "";
+            return row[namedColumnIndex].ToString() ?? "";
         }
 
         private Dictionary<string, object> ExtractAdditionalFields(SepReader.Row row)
@@ -381,6 +507,8 @@ namespace LogTapestry.Core
 
                 _reader?.Dispose();
                 _reader = null;
+                
+                _readerExhausted = true;
             }
             catch (Exception ex)
             {
