@@ -25,10 +25,13 @@ namespace LogTapestry.Ingester
       (settings, filePath, loggerFactory) => new RegexLogParser(settings, filePath, loggerFactory.CreateLogger<RegexLogParser>());
     private static readonly Func<PluginSettings, string, ILoggerFactory, ILogParser> CsvParserFactory =
       (settings, filePath, loggerFactory) => new CsvLogParser(settings, filePath, loggerFactory.CreateLogger<CsvLogParser>());
+    private static readonly Func<PluginSettings, string, ILoggerFactory, ILogParser> SepCsvParserFactory =
+      (settings, filePath, loggerFactory) => new SepCsvLogParser(settings, filePath, loggerFactory.CreateLogger<SepCsvLogParser>());
     private static readonly IReadOnlyDictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>> ParserFactories =
       new Dictionary<string, Func<PluginSettings, string, ILoggerFactory, ILogParser>>(StringComparer.OrdinalIgnoreCase) {
         ["regex"] = RegexParserFactory,
-        ["csv"] = CsvParserFactory
+        ["csv"] = CsvParserFactory,
+        ["sepcsv"] = SepCsvParserFactory
       };
 
     private readonly List<(PluginSettings Plugin, Matcher Matcher)> _pluginMatchers;
@@ -124,7 +127,16 @@ namespace LogTapestry.Ingester
         }
         
         // Update current position after parsing
-        currentPosition = fs.Position;
+        if (parser is IPositionAwareLogParser positionAwareParser)
+        {
+          // Use the parser's position tracking and sync the stream
+          positionAwareParser.UpdateUnderlyingStreamPosition(fs);
+          currentPosition = positionAwareParser.GetCurrentPosition();
+        }
+        else
+        {
+          currentPosition = fs.Position;
+        }
 
         // Yield DataBlock if we've reached the entry limit
         if (successfulEntries.Count >= maxEntriesPerBlock)

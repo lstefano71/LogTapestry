@@ -16,6 +16,25 @@ namespace LogTapestry.Core
   }
 
   /// <summary>
+  /// Interface for parsers that manage their own position tracking.
+  /// This is useful for parsers that wrap streams or use libraries that don't directly update stream position.
+  /// </summary>
+  public interface IPositionAwareLogParser : ILogParser
+  {
+    /// <summary>
+    /// Gets the current position in the stream after parsing operations.
+    /// </summary>
+    /// <returns>The current byte position in the stream.</returns>
+    long GetCurrentPosition();
+
+    /// <summary>
+    /// Updates the underlying stream position to match the parser's internal tracking.
+    /// </summary>
+    /// <param name="underlyingStream">The stream to update.</param>
+    void UpdateUnderlyingStreamPosition(Stream underlyingStream);
+  }
+
+  /// <summary>
   /// Legacy interface for backward compatibility during transition.
   /// </summary>
   public interface ILegacyLogParser
