@@ -71,11 +71,10 @@ namespace LogTapestry.Core
 
     private async Task<string?> ReadNextCsvRecordAsync(Stream stream, CancellationToken token)
     {
-      var record = new StringBuilder();
+      WorkingStringBuilder.Clear(); // Use the shared StringBuilder
       bool inQuotes = false;
-      bool foundCompleteRecord = false;
-
-      while (!foundCompleteRecord && !token.IsCancellationRequested)
+      
+      while (!token.IsCancellationRequested)
       {
         // Read more data into buffer if needed
         if (BufferLength == 0)
@@ -84,82 +83,77 @@ namespace LogTapestry.Core
           if (bytesRead == 0)
           {
             // End of stream - return any remaining data as a record
-            if (record.Length > 0)
+            if (WorkingStringBuilder.Length > 0)
             {
-              return record.ToString();
+              return WorkingStringBuilder.ToString();
             }
             return null;
           }
         }
 
-        // Process buffer byte by byte
+        // Process buffer efficiently looking for record boundaries
         int startPos = 0;
         for (int i = 0; i < BufferLength; i++)
         {
-          char c = (char)Buffer[i];
-
-          if (c == _csvConfig.QuoteChar[0])
+          byte b = Buffer[i];
+          
+          if (b == (byte)_csvConfig.QuoteChar[0])
           {
             inQuotes = !inQuotes;
           }
-          else if (!inQuotes && (c == '\n'))
+          else if (!inQuotes && (b == (byte)'\n'))
           {
             // Found end of record outside quotes
             
             // Add the data up to (but not including) the newline
             if (i > startPos)
             {
-              record.Append(BufferToString(startPos, i - startPos));
+              AppendBufferToStringBuilder(WorkingStringBuilder, startPos, i - startPos);
             }
+            
+            var result = WorkingStringBuilder.ToString();
             
             // Remove processed data from buffer (including the newline)
             ConsumeBuffer(i + 1);
             
-            foundCompleteRecord = true;
-            break;
+            return result;
           }
-          else if (!inQuotes && c == '\r')
+          else if (!inQuotes && b == (byte)'\r')
           {
             // Handle \r\n or standalone \r
+            int lineEndPos = i;
+            int consumeLength;
+            
             if (i + 1 < BufferLength && Buffer[i + 1] == (byte)'\n')
             {
-              // \r\n sequence - add data up to \r and consume both \r\n
-              if (i > startPos)
-              {
-                record.Append(BufferToString(startPos, i - startPos));
-              }
-              
-              ConsumeBuffer(i + 2);
-              foundCompleteRecord = true;
-              break;
+              consumeLength = i + 2; // \r\n
             }
             else
             {
-              // Standalone \r - treat as record terminator
-              if (i > startPos)
-              {
-                record.Append(BufferToString(startPos, i - startPos));
-              }
-              
-              ConsumeBuffer(i + 1);
-              foundCompleteRecord = true;
-              break;
+              consumeLength = i + 1; // standalone \r
             }
+            
+            // Add data up to \r
+            if (lineEndPos > startPos)
+            {
+              AppendBufferToStringBuilder(WorkingStringBuilder, startPos, lineEndPos - startPos);
+            }
+            
+            var result = WorkingStringBuilder.ToString();
+            ConsumeBuffer(consumeLength);
+            return result;
           }
         }
 
-        // If we haven't found a complete record, add all remaining buffer data to record
-        if (!foundCompleteRecord)
+        // No complete record found, append all buffer data and continue
+        if (BufferLength > startPos)
         {
-          if (BufferLength > startPos)
-          {
-            record.Append(BufferToString(startPos, BufferLength - startPos));
-          }
-          ConsumeBuffer(BufferLength); // Clear the entire buffer
+          AppendBufferToStringBuilder(WorkingStringBuilder, startPos, BufferLength - startPos);
         }
+        ConsumeBuffer(BufferLength);
       }
 
-      return foundCompleteRecord ? record.ToString() : null;
+      return null;
     }
 
     public override async ValueTask DisposeAsync()

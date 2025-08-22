@@ -231,71 +231,63 @@ namespace LogTapestry.Core
           }
         }
 
-        // Process buffer byte by byte to find complete lines
-        int startPos = 0;
-        for (int i = 0; i < BufferLength; i++)
+        // Look for line endings using optimized byte search
+        int newlinePos = IndexOfByte((byte)'\n');
+        int crPos = IndexOfByte((byte)'\r');
+        
+        int lineEndPos = -1;
+        int consumeLength = 0;
+        
+        if (newlinePos >= 0 && (crPos < 0 || newlinePos < crPos))
         {
-          char c = (char)Buffer[i];
-
-          if (c == '\n')
+          // Found \n first (or only)
+          lineEndPos = newlinePos;
+          consumeLength = newlinePos + 1;
+        }
+        else if (crPos >= 0)
+        {
+          // Found \r first
+          lineEndPos = crPos;
+          
+          // Check for \r\n sequence using BufferContainsAt
+          if (crPos + 1 < BufferLength && Buffer[crPos + 1] == (byte)'\n')
           {
-            // Found end of line
-            
-            // Add the data up to (but not including) the newline to line buffer
-            if (i > startPos)
-            {
-              _lineBuffer.Append(BufferToString(startPos, i - startPos));
-            }
-            
-            // Get the complete line
-            var completeLine = _lineBuffer.ToString();
-            _lineBuffer.Clear();
-            
-            // Remove processed data from buffer (including the newline)
-            ConsumeBuffer(i + 1);
-            
-            return completeLine;
+            consumeLength = crPos + 2;
           }
-          else if (c == '\r')
+          else
           {
-            // Handle \r\n or standalone \r
-            if (i + 1 < BufferLength && Buffer[i + 1] == (byte)'\n')
-            {
-              // \r\n sequence - add data up to \r and consume both \r\n
-              if (i > startPos)
-              {
-                _lineBuffer.Append(BufferToString(startPos, i - startPos));
-              }
-              
-              var completeLine = _lineBuffer.ToString();
-              _lineBuffer.Clear();
-              
-              ConsumeBuffer(i + 2);
-              return completeLine;
-            }
-            else
-            {
-              // Standalone \r - treat as line terminator
-              if (i > startPos)
-              {
-                _lineBuffer.Append(BufferToString(startPos, i - startPos));
-              }
-              
-              var completeLine = _lineBuffer.ToString();
-              _lineBuffer.Clear();
-              
-              ConsumeBuffer(i + 1);
-              return completeLine;
-            }
+            consumeLength = crPos + 1;
           }
         }
-
-        // If we haven't found a complete line, add all remaining buffer data to line buffer
-        if (BufferLength > startPos)
+        
+        if (lineEndPos >= 0)
         {
-          _lineBuffer.Append(BufferToString(startPos, BufferLength - startPos));
+          // Found complete line
+          
+          // Append any data before the line ending to line buffer
+          if (lineEndPos > 0)
+          {
+            AppendBufferToStringBuilder(_lineBuffer, 0, lineEndPos);
+          }
+          
+          // Get the complete line
+          var completeLine = _lineBuffer.ToString();
+          _lineBuffer.Clear();
+          
+          // Remove processed data from buffer
+          ConsumeBuffer(consumeLength);
+          
+          return completeLine;
         }
-        ConsumeBuffer(BufferLength); // Clear the entire buffer
+        else
+        {
+          // No complete line found, append all buffer data to line buffer
+          if (BufferLength > 0)
+          {
+            AppendBufferToStringBuilder(_lineBuffer, 0, BufferLength);
+            ConsumeBuffer(BufferLength);
+          }
+        }
       }
 
       return null;
