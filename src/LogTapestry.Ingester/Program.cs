@@ -157,19 +157,17 @@ public class Program
       return new ParquetSink(logger, stateProvider, parquetConfig);
     });
     
-    // Register OTEL sink if configured
-    builder.Services.AddHttpClient<OtelSink>();
+    // Register OTEL sink using official OpenTelemetry libraries
     builder.Services.AddSingleton<IMultiDataSink>(sp => {
-      var logger = sp.GetRequiredService<ILogger<OtelSink>>();
-      var httpClient = sp.GetRequiredService<HttpClient>();
+      var logger = sp.GetRequiredService<ILogger<OtelSinkImproved>>();
       var settings = sp.GetRequiredService<IOptions<LogTapestrySettings>>().Value;
       
-      var otelConfig = new OtelSinkConfiguration();
+      var otelConfig = new SinkConfigurations.OpenTelemetrySinkConfig();
       if (settings.Sinks.Configurations.TryGetValue("otel", out var sinkDef)) {
-        otelConfig = sinkDef.GetSinkConfig<OtelSinkConfiguration>();
+        otelConfig = sinkDef.GetSinkConfig<SinkConfigurations.OpenTelemetrySinkConfig>();
       }
       
-      return new OtelSink(logger, httpClient, otelConfig);
+      return new OtelSinkImproved(logger, otelConfig);
     });
     
     // Register MultiSinkProcessor
